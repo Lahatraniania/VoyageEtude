@@ -16,16 +16,16 @@ function getGeminiClient() {
   if (!apiKey) return null;
   return new GoogleGenAI({
     apiKey,
-    httpOptions: {
-      headers: {
-        "User-Agent": "aistudio-build",
-      },
-    },
+    httpOptions: { headers: { "User-Agent": "aistudio-build" } },
   });
 }
 
 const PORT = 3000;
-const UPLOAD_DIR = path.resolve(process.cwd(), "uploads", "etudiants", "photos");
+
+// ✅ VERCEL : Sur Vercel, seul /tmp est inscriptible. En local, on garde uploads/.
+const UPLOAD_DIR = process.env.VERCEL
+  ? "/tmp/uploads/etudiants/photos"
+  : path.resolve(process.cwd(), "uploads", "etudiants", "photos");
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 const storage = multer.diskStorage({
@@ -191,13 +191,18 @@ function requireAuth(req: express.Request, res: express.Response, next: express.
   next();
 }
 
-async function startServer() {
+async function createApp() {
   const app = express();
   app.set("trust proxy", true);
   app.use(express.json());
-  app.use("/media", express.static(path.resolve(process.cwd(), "uploads")));
 
-  // Auth
+  // ✅ VERCEL : On sert les médias depuis /tmp sur Vercel, depuis uploads/ en local
+  const MEDIA_ROOT = process.env.VERCEL
+    ? "/tmp/uploads"
+    : path.resolve(process.cwd(), "uploads");
+  app.use("/media", express.static(MEDIA_ROOT));
+
+  // ============ AUTH ============
   app.post("/api/auth/login/", (req, res) => {
     const { username, password } = req.body || {};
     if (username === ADMIN_USER.username && password === ADMIN_USER.password) {
@@ -226,7 +231,7 @@ async function startServer() {
     });
   });
 
-  // Core Parametres
+  // ============ CORE PARAMETRES ============
   app.get("/api/core/parametres/", (_req, res) => {
     res.json([parametres]);
   });
@@ -246,7 +251,7 @@ async function startServer() {
     res.json(parametres);
   });
 
-  // Etudiants
+  // ============ ETUDIANTS ============
   app.get("/api/etudiants/", (req, res) => {
     const { backend } = getBaseUrl(req);
     const search = String(req.query.search || "").trim().toLowerCase();
@@ -328,7 +333,7 @@ async function startServer() {
     res.status(204).end();
   });
 
-  // Programme
+  // ============ PROGRAMME ============
   app.get("/api/programme/", (_req, res) => {
     const sorted = [...programmes].sort((a, b) => a.jour - b.jour || a.heure_debut.localeCompare(b.heure_debut));
     res.json(sorted);
@@ -376,7 +381,7 @@ async function startServer() {
     res.status(204).end();
   });
 
-  // Voitures
+  // ============ VOITURES ============
   app.get("/api/voitures/liste/", (req, res) => {
     const { backend } = getBaseUrl(req);
     const enriched = [...voitures]
@@ -554,7 +559,7 @@ async function startServer() {
     });
   });
 
-  // Affectations
+  // ============ AFFECTATIONS ============
   app.get("/api/voitures/affectations/", (req, res) => {
     const { backend } = getBaseUrl(req);
     const list = affectations.map((a) => {
@@ -619,7 +624,7 @@ async function startServer() {
     res.status(204).end();
   });
 
-  // Agent IA VoyageE (connecté aux données en direct)
+  // ============ AGENT IA ============
   app.post("/api/agent-ia/ask/", async (req, res) => {
     try {
       const { message, history } = req.body || {};
@@ -631,7 +636,7 @@ async function startServer() {
       const ai = getGeminiClient();
       if (!ai) {
         res.status(500).json({
-          detail: "Clé GEMINI_API_KEY manquante côté serveur (.env ou Settings > Secrets).",
+          detail: "Clé GEMINI_API_KEY manquante côté serveur.",
         });
         return;
       }
@@ -721,23 +726,19 @@ async function startServer() {
         : question;
 
       const response = await ai.models.generateContent({
-        model: "gemini-4-hydrogen",
+        model: "gemini-2.5-flash", // ✅ modèle stable
         contents: prompt,
-        config: {
-          systemInstruction,
-        },
+        config: { systemInstruction },
       });
 
-      res.json({
-        reply: response.text || "Aucune réponse générée.",
-      });
+      res.json({ reply: response.text || "Aucune réponse générée." });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Erreur lors de l'appel à l'Agent IA.";
       res.status(500).json({ detail: msg });
     }
   });
 
-  // Badges
+  // ============ BADGES ============
   app.get("/api/badges/:uuid/info/", (req, res) => {
     const { frontend, backend } = getBaseUrl(req);
     const etu = etudiants.find((e) => e.qr_token === req.params.uuid);
@@ -799,13 +800,12 @@ async function startServer() {
       color: { dark: "#14532d", light: "#ffffff" },
     });
 
-    // Badge A6 (297.64 x 419.53 pt) Recto / Verso
     const doc = new PDFDocument({ size: "A6", margin: 18 });
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="badge_${etu.matricule}.pdf"`);
     doc.pipe(res);
 
-    // PAGE 1: RECTO (Programme + Voiture)
+    // RECTO
     doc.rect(0, 0, doc.page.width, 62).fill("#14532d");
     doc.fillColor("#facc15").fontSize(12).font("Helvetica-Bold").text("VOYAGE D'ÉTUDES — ENI", 18, 16);
     doc.fillColor("#ffffff").fontSize(9).font("Helvetica").text(`Destination : ${parametres.destination} · Promo ${parametres.annee_promotion}`, 18, 34);
@@ -829,7 +829,7 @@ async function startServer() {
       { width: doc.page.width - 36, align: "center" }
     );
 
-    // PAGE 2: VERSO (Identité + Contacts + QR)
+    // VERSO
     doc.addPage({ size: "A6", margin: 18 });
     doc.rect(0, 0, doc.page.width, 54).fill("#166534");
     doc.fillColor("#ffffff").fontSize(11).font("Helvetica-Bold").text("BADGE ÉTUDIANT", 18, 15);
@@ -855,8 +855,9 @@ async function startServer() {
     doc.end();
   });
 
-  // Vite middleware or production static
-  if (process.env.NODE_ENV !== "production") {
+  // ============ VITE / STATIC ============
+  // ✅ VERCEL : En production (déploiement), on sert le dossier dist/
+  if (process.env.NODE_ENV !== "production" && !process.env.VERCEL) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
@@ -870,9 +871,16 @@ async function startServer() {
     });
   }
 
+  return app;
+}
+
+// ✅ VERCEL : On démarre seulement en local, on exporte sur Vercel
+const app = await createApp();
+
+if (process.env.VERCEL) {
+  module.exports = app;
+} else {
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`VoyageE server running on http://0.0.0.0:${PORT}`);
   });
 }
-
-startServer();
