@@ -4,9 +4,9 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "tsx --env-file=.env server.ts",
+    "dev": "tsx --env-file=.env dev.ts",
     "build": "vite build",
-    "start": "tsx --env-file=.env server.ts",
+    "start": "tsx --env-file=.env dev.ts",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit"

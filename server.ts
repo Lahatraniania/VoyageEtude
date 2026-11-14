@@ -191,7 +191,7 @@ function requireAuth(req: express.Request, res: express.Response, next: express.
   next();
 }
 
-async function createApp() {
+export async function createApp() {
   const app = express();
   app.set("trust proxy", true);
   app.use(express.json());
@@ -875,13 +875,4 @@ async function createApp() {
 }
 
 // ✅ VERCEL : On démarre seulement en local, on exporte sur Vercel
-export { createApp };
-
-// En local uniquement : démarre le serveur
-if (!process.env.VERCEL) {
-  createApp().then((app) => {
-    app.listen(PORT, "0.0.0.0", () => {
-      console.log(`VoyageE server running on http://0.0.0.0:${PORT}`);
-    });
-  });
-}
+export default await createApp();
