@@ -875,12 +875,13 @@ async function createApp() {
 }
 
 // ✅ VERCEL : On démarre seulement en local, on exporte sur Vercel
-const app = await createApp();
+export { createApp };
 
-if (process.env.VERCEL) {
-  module.exports = app;
-} else {
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`VoyageE server running on http://0.0.0.0:${PORT}`);
+// En local uniquement : démarre le serveur
+if (!process.env.VERCEL) {
+  createApp().then((app) => {
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`VoyageE server running on http://0.0.0.0:${PORT}`);
+    });
   });
 }
