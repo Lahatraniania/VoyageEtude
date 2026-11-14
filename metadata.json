@@ -1,0 +1,6 @@
+{
+  "name": "VoyageE — ENI",
+  "description": "Gestion de voyage d'étude, affectation des voitures, programme 7 jours et badges QR recto/verso pour l'ENI.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

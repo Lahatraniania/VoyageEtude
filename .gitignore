@@ -1,0 +1,34 @@
+# Dépendances
+node_modules/
+.pnp
+.pnp.js
+
+# Build
+dist/
+build/
+server.js
+
+# Environnement (⚠️ NE JAMAIS COMMITTER)
+.env
+.env.local
+.env.*.local
+
+# Uploads (photos uploadées localement)
+uploads/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.log
+
+# Cache
+.cache/
+.vite/
+.eslintcache
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
