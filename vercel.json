@@ -5,12 +5,12 @@
     "framework": "vite",
     "rewrites": [
         {
-            "source": "/api/(.*)",
-            "destination": "/api/index"
+            "source": "/src/api/(.*)",
+            "destination": "/src/api/index.ts"
         },
         {
             "source": "/(.*)",
-            "destination": "/index.html"
+            "destination": "/src/index.html"
         }
     ]
 }
