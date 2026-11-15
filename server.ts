@@ -875,4 +875,4 @@ export async function createApp() {
 }
 
 // ✅ VERCEL : On démarre seulement en local, on exporte sur Vercel
-export default await createApp();
+export default createApp;
