@@ -1,5 +1,6 @@
-import type { IncomingMessage, ServerResponse } from "http";
 import express from "express";
+import type { IncomingMessage, ServerResponse } from "http";
+import path from "path";
 import crypto from "crypto";
 import multer from "multer";
 import QRCode from "qrcode";
@@ -10,20 +11,27 @@ import { getPool } from "./db.js";
 
 dotenv.config();
 
-function getGeminiClient() {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) return null;
-    return new GoogleGenAI({
-        apiKey,
-        httpOptions: { headers: { "User-Agent": "aistudio-build" } },
-    });
-}
-
-// ✅ Mémoire uniquement : compatible Vercel et local, les photos vont dans PostgreSQL (BYTEA)
 const upload = multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: 4 * 1024 * 1024 },
 });
+
+function getGeminiClient() {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) return null;
+    return new GoogleGenAI({ apiKey });
+}
+
+function cleanAiReply(text: string): string {
+    return text
+        .replace(/\*\*(.*?)\*\*/g, "$1")
+        .replace(/__(.*?)__/g, "$1")
+        .replace(/\*/g, "")
+        .replace(/^#{1,6}\s+/gm, "")
+        .replace(/`{1,3}/g, "")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim();
+}
 
 const ADMIN_USER = {
     id: 1,
@@ -67,40 +75,17 @@ function validHttpUrl(value?: string): string {
     return /^https?:\/\/.+/i.test(trimmed) ? trimmed : "";
 }
 
-function getBaseUrl(req: express.Request): {
-    frontend: string;
-    backend: string;
-    mediaBase: string;
-} {
-    const host = req.get("host");
-    const origin = host ? `${req.protocol}://${host}` : "";
-    const vercelUrl = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "";
+function getBaseUrl(req: express.Request) {
+    const proto = String(req.headers["x-forwarded-proto"] || req.protocol || "https");
+    const host = String(req.headers["x-forwarded-host"] || req.get("host") || "");
+    const origin = host ? `${proto}://${host}` : "";
     const frontend =
         validHttpUrl(process.env.PUBLIC_FRONTEND_URL) ||
         validHttpUrl(process.env.APP_URL) ||
-        origin ||
-        vercelUrl;
+        origin;
     const explicitBackend = validHttpUrl(process.env.PUBLIC_BACKEND_URL);
-    const backend = explicitBackend || validHttpUrl(process.env.APP_URL) || origin || vercelUrl;
     const mediaBase = explicitBackend || "";
-    return { frontend, backend, mediaBase };
-}
-
-function formatEtudiant(row: Record<string, any>, mediaBase: string) {
-    return {
-        id: row.id,
-        matricule: row.matricule,
-        nom: row.nom,
-        prenom: row.prenom,
-        parcours: row.parcours,
-        email: row.email,
-        telephone: row.telephone,
-        photo: row.photo || null,
-        photo_url: row.photo ? `${mediaBase}${row.photo}` : null,
-        qr_token: row.qr_token,
-        voiture_numero: row.voiture_numero ?? null,
-        voiture_id: row.voiture_id ?? null,
-    };
+    return { frontend, mediaBase };
 }
 
 function requireAuth(
@@ -113,16 +98,41 @@ function requireAuth(
         res.status(401).json({ detail: "Authentification requise." });
         return;
     }
-    const token = header.slice(7);
-    if (!verifySignedToken(token)) {
+    if (!verifySignedToken(header.slice(7))) {
         res.status(401).json({ detail: "Token invalide ou expiré." });
         return;
     }
     next();
 }
 
+function formatEtudiantRow(
+    row: Record<string, any>,
+    mediaBase: string
+) {
+    return {
+        id: row.id,
+        matricule: row.matricule,
+        nom: row.nom,
+        prenom: row.prenom,
+        parcours: row.parcours,
+        email: row.email || "",
+        telephone: row.telephone || "",
+        photo: row.has_photo ? `/api/etudiants/${row.id}/photo/` : null,
+        photo_url: row.has_photo ? `${mediaBase}/api/etudiants/${row.id}/photo/` : null,
+        qr_token: row.qr_token,
+        voiture_numero: row.voiture_numero ?? null,
+        voiture_id: row.voiture_id ?? null,
+    };
+}
+
+let cachedApp: express.Express | null = null;
+
 export async function createApp() {
+    if (cachedApp) return cachedApp;
+
     const app = express();
+    const pool = getPool();
+
     app.set("trust proxy", true);
     app.use(express.json());
 
@@ -153,12 +163,11 @@ export async function createApp() {
         });
     });
 
-    // ============ CORE PARAMETRES ============
+    // ============ PARAMETRES ============
     app.get("/api/core/parametres/", async (_req, res) => {
         try {
-            const pool = getPool();
             const { rows } = await pool.query(
-                "SELECT id, date_debut, date_fin, destination, ecole, annee_promotion, nom_responsable, tel_responsable, nom_responsable_sante, tel_responsable_sante FROM parametres_voyage WHERE id = 1"
+                "SELECT * FROM parametres_voyage ORDER BY id ASC LIMIT 1"
             );
             res.json(rows);
         } catch (err: any) {
@@ -166,24 +175,57 @@ export async function createApp() {
         }
     });
 
+    app.post("/api/core/parametres/", requireAuth, async (req, res) => {
+        try {
+            const b = req.body || {};
+            const { rows } = await pool.query(
+                `INSERT INTO parametres_voyage (id, date_debut, date_fin, destination, ecole, annee_promotion, nom_responsable, tel_responsable, nom_responsable_sante, tel_responsable_sante)
+         VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9)
+         ON CONFLICT (id) DO UPDATE SET
+           date_debut = EXCLUDED.date_debut,
+           date_fin = EXCLUDED.date_fin,
+           destination = EXCLUDED.destination,
+           ecole = EXCLUDED.ecole,
+           annee_promotion = EXCLUDED.annee_promotion,
+           nom_responsable = EXCLUDED.nom_responsable,
+           tel_responsable = EXCLUDED.tel_responsable,
+           nom_responsable_sante = EXCLUDED.nom_responsable_sante,
+           tel_responsable_sante = EXCLUDED.tel_responsable_sante
+         RETURNING *`,
+                [
+                    b.date_debut,
+                    b.date_fin,
+                    b.destination,
+                    b.ecole || "ENI",
+                    b.annee_promotion || "2025-2026",
+                    b.nom_responsable || "",
+                    b.tel_responsable || "",
+                    b.nom_responsable_sante || "",
+                    b.tel_responsable_sante || "",
+                ]
+            );
+            res.status(201).json(rows[0]);
+        } catch (err: any) {
+            res.status(500).json({ detail: err.message });
+        }
+    });
+
     const updateParametres = async (req: express.Request, res: express.Response) => {
         try {
-            const pool = getPool();
             const b = req.body || {};
             const { rows } = await pool.query(
                 `UPDATE parametres_voyage SET
-          date_debut = COALESCE($1, date_debut),
-          date_fin = COALESCE($2, date_fin),
-          destination = COALESCE($3, destination),
-          ecole = COALESCE($4, ecole),
-          annee_promotion = COALESCE($5, annee_promotion),
-          nom_responsable = COALESCE($6, nom_responsable),
-          tel_responsable = COALESCE($7, tel_responsable),
-          nom_responsable_sante = COALESCE($8, nom_responsable_sante),
-          tel_responsable_sante = COALESCE($9, tel_responsable_sante),
-          updated_at = NOW()
-        WHERE id = 1
-        RETURNING id, date_debut, date_fin, destination, ecole, annee_promotion, nom_responsable, tel_responsable, nom_responsable_sante, tel_responsable_sante`,
+           date_debut = COALESCE($1, date_debut),
+           date_fin = COALESCE($2, date_fin),
+           destination = COALESCE($3, destination),
+           ecole = COALESCE($4, ecole),
+           annee_promotion = COALESCE($5, annee_promotion),
+           nom_responsable = COALESCE($6, nom_responsable),
+           tel_responsable = COALESCE($7, tel_responsable),
+           nom_responsable_sante = COALESCE($8, nom_responsable_sante),
+           tel_responsable_sante = COALESCE($9, tel_responsable_sante)
+         WHERE id = $10
+         RETURNING *`,
                 [
                     b.date_debut ?? null,
                     b.date_fin ?? null,
@@ -194,6 +236,7 @@ export async function createApp() {
                     b.tel_responsable ?? null,
                     b.nom_responsable_sante ?? null,
                     b.tel_responsable_sante ?? null,
+                    Number(req.params.id) || 1,
                 ]
             );
             res.json(rows[0]);
@@ -201,54 +244,12 @@ export async function createApp() {
             res.status(500).json({ detail: err.message });
         }
     };
-
-    app.post("/api/core/parametres/", requireAuth, updateParametres);
     app.put("/api/core/parametres/:id/", requireAuth, updateParametres);
     app.patch("/api/core/parametres/:id/", requireAuth, updateParametres);
 
     // ============ ETUDIANTS ============
-    app.get("/api/etudiants/", async (req, res) => {
-        try {
-            const pool = getPool();
-            const { mediaBase } = getBaseUrl(req);
-            const search = String(req.query.search || "").trim().toLowerCase();
-            const parcours = String(req.query.parcours || "").trim().toUpperCase();
-
-            const params: any[] = [];
-            const conditions: string[] = [];
-
-            if (search) {
-                params.push(`%${search}%`);
-                conditions.push(
-                    `(LOWER(e.nom) LIKE $${params.length} OR LOWER(e.prenom) LIKE $${params.length} OR LOWER(e.matricule) LIKE $${params.length})`
-                );
-            }
-            if (parcours) {
-                params.push(parcours);
-                conditions.push(`e.parcours = $${params.length}`);
-            }
-
-            const whereClause = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-            const { rows } = await pool.query(
-                `SELECT e.id, e.matricule, e.nom, e.prenom, e.parcours, e.email, e.telephone, e.photo, e.qr_token,
-                v.id AS voiture_id, v.numero_voiture
-         FROM etudiants e
-         LEFT JOIN affectations a ON a.etudiant = e.id
-         LEFT JOIN voitures v ON v.id = a.voiture
-         ${whereClause}
-         ORDER BY e.id DESC`,
-                params
-            );
-
-            res.json(rows.map((r) => formatEtudiant(r, mediaBase)));
-        } catch (err: any) {
-            res.status(500).json({ detail: err.message });
-        }
-    });
-
     app.get("/api/etudiants/:id/photo/", async (req, res) => {
         try {
-            const pool = getPool();
             const { rows } = await pool.query(
                 "SELECT photo_data, photo_mime FROM etudiants WHERE id = $1",
                 [Number(req.params.id)]
@@ -265,110 +266,114 @@ export async function createApp() {
         }
     });
 
+    app.get("/api/etudiants/", async (req, res) => {
+        try {
+            const { mediaBase } = getBaseUrl(req);
+            const search = String(req.query.search || "").trim();
+            const parcours = String(req.query.parcours || "").trim().toUpperCase();
+
+            const conditions: string[] = [];
+            const values: any[] = [];
+            if (search) {
+                values.push(`%${search}%`);
+                conditions.push(
+                    `(e.nom ILIKE $${values.length} OR e.prenom ILIKE $${values.length} OR e.matricule ILIKE $${values.length})`
+                );
+            }
+            if (parcours) {
+                values.push(parcours);
+                conditions.push(`e.parcours = $${values.length}`);
+            }
+            const whereClause = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+
+            const { rows } = await pool.query(
+                `SELECT e.id, e.matricule, e.nom, e.prenom, e.parcours, e.email, e.telephone,
+                e.qr_token, (e.photo_data IS NOT NULL) AS has_photo,
+                v.id AS voiture_id, v.numero_voiture AS voiture_numero
+         FROM etudiants e
+         LEFT JOIN affectations a ON a.etudiant = e.id
+         LEFT JOIN voitures v ON v.id = a.voiture
+         ${whereClause}
+         ORDER BY e.id DESC`,
+                values
+            );
+
+            res.json(rows.map((r) => formatEtudiantRow(r, mediaBase)));
+        } catch (err: any) {
+            res.status(500).json({ detail: err.message });
+        }
+    });
+
     app.post("/api/etudiants/", requireAuth, upload.single("photo"), async (req, res) => {
         try {
-            const pool = getPool();
             const { mediaBase } = getBaseUrl(req);
-            const body = req.body || {};
-
-            if (!body.matricule || !body.nom || !body.prenom || !body.parcours) {
+            const b = req.body || {};
+            if (!b.matricule || !b.nom || !b.prenom || !b.parcours) {
                 res.status(400).json({ detail: "Matricule, nom, prénom et parcours sont obligatoires." });
                 return;
             }
 
-            const existing = await pool.query(
-                "SELECT id FROM etudiants WHERE LOWER(matricule) = LOWER($1)",
-                [String(body.matricule).trim()]
-            );
-            if (existing.rows.length > 0) {
-                res.status(400).json({ matricule: ["Ce matricule existe déjà."] });
-                return;
-            }
-
-            const qrToken = crypto.randomUUID();
             const { rows } = await pool.query(
                 `INSERT INTO etudiants (matricule, nom, prenom, parcours, email, telephone, photo_data, photo_mime, qr_token)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-         RETURNING id, matricule, nom, prenom, parcours, email, telephone, photo, qr_token`,
+         RETURNING id, matricule, nom, prenom, parcours, email, telephone, qr_token, (photo_data IS NOT NULL) AS has_photo`,
                 [
-                    String(body.matricule).trim(),
-                    String(body.nom).trim().toUpperCase(),
-                    String(body.prenom).trim(),
-                    String(body.parcours).trim().toUpperCase(),
-                    body.email || "",
-                    body.telephone || "",
+                    String(b.matricule).trim(),
+                    String(b.nom).trim().toUpperCase(),
+                    String(b.prenom).trim(),
+                    String(b.parcours).trim().toUpperCase(),
+                    b.email || "",
+                    b.telephone || "",
                     req.file ? req.file.buffer : null,
                     req.file ? req.file.mimetype : null,
-                    qrToken,
+                    crypto.randomUUID(),
                 ]
             );
-
-            let student = rows[0];
-            if (req.file) {
-                const photoPath = `/api/etudiants/${student.id}/photo/?v=${Date.now()}`;
-                const updated = await pool.query(
-                    "UPDATE etudiants SET photo = $1 WHERE id = $2 RETURNING id, matricule, nom, prenom, parcours, email, telephone, photo, qr_token",
-                    [photoPath, student.id]
-                );
-                student = updated.rows[0];
-            }
-
-            res.status(201).json(formatEtudiant(student, mediaBase));
+            res.status(201).json(formatEtudiantRow(rows[0], mediaBase));
         } catch (err: any) {
+            if (err.code === "23505") {
+                res.status(400).json({ matricule: ["Ce matricule existe déjà."] });
+                return;
+            }
             res.status(500).json({ detail: err.message });
         }
     });
 
     app.patch("/api/etudiants/:id/", requireAuth, upload.single("photo"), async (req, res) => {
         try {
-            const pool = getPool();
             const { mediaBase } = getBaseUrl(req);
             const id = Number(req.params.id);
-            const body = req.body || {};
+            const b = req.body || {};
 
-            const current = await pool.query("SELECT id FROM etudiants WHERE id = $1", [id]);
-            if (current.rows.length === 0) {
-                res.status(404).json({ detail: "Étudiant introuvable." });
-                return;
-            }
-
-            const photoPath = req.file ? `/api/etudiants/${id}/photo/?v=${Date.now()}` : null;
-            await pool.query(
+            const { rows } = await pool.query(
                 `UPDATE etudiants SET
-          matricule = COALESCE($1, matricule),
-          nom = COALESCE($2, nom),
-          prenom = COALESCE($3, prenom),
-          parcours = COALESCE($4, parcours),
-          email = COALESCE($5, email),
-          telephone = COALESCE($6, telephone),
-          photo = COALESCE($7, photo),
-          photo_data = COALESCE($8, photo_data),
-          photo_mime = COALESCE($9, photo_mime)
-        WHERE id = $10`,
+           matricule = COALESCE($1, matricule),
+           nom = COALESCE($2, nom),
+           prenom = COALESCE($3, prenom),
+           parcours = COALESCE($4, parcours),
+           email = COALESCE($5, email),
+           telephone = COALESCE($6, telephone),
+           photo_data = COALESCE($7, photo_data),
+           photo_mime = COALESCE($8, photo_mime)
+         WHERE id = $9
+         RETURNING id, matricule, nom, prenom, parcours, email, telephone, qr_token, (photo_data IS NOT NULL) AS has_photo`,
                 [
-                    body.matricule !== undefined ? String(body.matricule).trim() : null,
-                    body.nom !== undefined ? String(body.nom).trim().toUpperCase() : null,
-                    body.prenom !== undefined ? String(body.prenom).trim() : null,
-                    body.parcours !== undefined ? String(body.parcours).trim().toUpperCase() : null,
-                    body.email !== undefined ? String(body.email) : null,
-                    body.telephone !== undefined ? String(body.telephone) : null,
-                    photoPath,
+                    b.matricule !== undefined ? String(b.matricule).trim() : null,
+                    b.nom !== undefined ? String(b.nom).trim().toUpperCase() : null,
+                    b.prenom !== undefined ? String(b.prenom).trim() : null,
+                    b.parcours !== undefined ? String(b.parcours).trim().toUpperCase() : null,
+                    b.email ?? null,
+                    b.telephone ?? null,
                     req.file ? req.file.buffer : null,
                     req.file ? req.file.mimetype : null,
                     id,
                 ]
             );
-
-            const { rows } = await pool.query(
-                `SELECT e.id, e.matricule, e.nom, e.prenom, e.parcours, e.email, e.telephone, e.photo, e.qr_token,
-                v.id AS voiture_id, v.numero_voiture
-         FROM etudiants e
-         LEFT JOIN affectations a ON a.etudiant = e.id
-         LEFT JOIN voitures v ON v.id = a.voiture
-         WHERE e.id = $1`,
-                [id]
-            );
-            res.json(formatEtudiant(rows[0], mediaBase));
+            if (!rows[0]) {
+                res.status(404).json({ detail: "Étudiant introuvable." });
+                return;
+            }
+            res.json(formatEtudiantRow(rows[0], mediaBase));
         } catch (err: any) {
             res.status(500).json({ detail: err.message });
         }
@@ -376,8 +381,8 @@ export async function createApp() {
 
     app.delete("/api/etudiants/:id/", requireAuth, async (req, res) => {
         try {
-            const pool = getPool();
             const id = Number(req.params.id);
+            await pool.query("UPDATE voitures SET chef_voiture = NULL WHERE chef_voiture = $1", [id]);
             const result = await pool.query("DELETE FROM etudiants WHERE id = $1", [id]);
             if (result.rowCount === 0) {
                 res.status(404).json({ detail: "Étudiant introuvable." });
@@ -392,9 +397,8 @@ export async function createApp() {
     // ============ PROGRAMME ============
     app.get("/api/programme/", async (_req, res) => {
         try {
-            const pool = getPool();
             const { rows } = await pool.query(
-                "SELECT id, jour, periode, heure_debut, heure_fin, activite, lieu FROM programme_items ORDER BY jour ASC, heure_debut ASC"
+                "SELECT * FROM programme_items ORDER BY jour ASC, heure_debut ASC"
             );
             res.json(rows);
         } catch (err: any) {
@@ -404,25 +408,16 @@ export async function createApp() {
 
     app.post("/api/programme/", requireAuth, async (req, res) => {
         try {
-            const pool = getPool();
-            const body = req.body || {};
-            const jour = Number(body.jour);
+            const b = req.body || {};
+            const jour = Number(b.jour);
             if (jour < 1 || jour > 7) {
                 res.status(400).json({ jour: ["Le jour doit être compris entre 1 et 7."] });
                 return;
             }
             const { rows } = await pool.query(
                 `INSERT INTO programme_items (jour, periode, heure_debut, heure_fin, activite, lieu)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         RETURNING id, jour, periode, heure_debut, heure_fin, activite, lieu`,
-                [
-                    jour,
-                    body.periode || "MATIN",
-                    body.heure_debut || "08:00",
-                    body.heure_fin || null,
-                    body.activite || "",
-                    body.lieu || "",
-                ]
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+                [jour, b.periode || "MATIN", b.heure_debut || "08:00", b.heure_fin || null, b.activite || "", b.lieu || ""]
             );
             res.status(201).json(rows[0]);
         } catch (err: any) {
@@ -432,24 +427,22 @@ export async function createApp() {
 
     app.patch("/api/programme/:id/", requireAuth, async (req, res) => {
         try {
-            const pool = getPool();
             const id = Number(req.params.id);
             const b = req.body || {};
             const { rows } = await pool.query(
                 `UPDATE programme_items SET
-          jour = COALESCE($1, jour),
-          periode = COALESCE($2, periode),
-          heure_debut = COALESCE($3, heure_debut),
-          heure_fin = COALESCE($4, heure_fin),
-          activite = COALESCE($5, activite),
-          lieu = COALESCE($6, lieu)
-         WHERE id = $7
-         RETURNING id, jour, periode, heure_debut, heure_fin, activite, lieu`,
+           jour = COALESCE($1, jour),
+           periode = COALESCE($2, periode),
+           heure_debut = COALESCE($3, heure_debut),
+           heure_fin = COALESCE($4, heure_fin),
+           activite = COALESCE($5, activite),
+           lieu = COALESCE($6, lieu)
+         WHERE id = $7 RETURNING *`,
                 [
                     b.jour !== undefined ? Number(b.jour) : null,
                     b.periode ?? null,
                     b.heure_debut ?? null,
-                    b.heure_fin !== undefined ? b.heure_fin || null : null,
+                    b.heure_fin ?? null,
                     b.activite ?? null,
                     b.lieu ?? null,
                     id,
@@ -467,10 +460,7 @@ export async function createApp() {
 
     app.delete("/api/programme/:id/", requireAuth, async (req, res) => {
         try {
-            const pool = getPool();
-            const result = await pool.query("DELETE FROM programme_items WHERE id = $1", [
-                Number(req.params.id),
-            ]);
+            const result = await pool.query("DELETE FROM programme_items WHERE id = $1", [Number(req.params.id)]);
             if (result.rowCount === 0) {
                 res.status(404).json({ detail: "Activité introuvable." });
                 return;
@@ -481,36 +471,65 @@ export async function createApp() {
         }
     });
 
-    // ============ VOITURES ============
+    // ============ VOITURES (AVEC PHOTO EN BASE) ============
+    app.get("/api/voitures/:id/photo/", async (req, res) => {
+        try {
+            const { rows } = await pool.query(
+                "SELECT photo_data, photo_mime FROM voitures WHERE id = $1",
+                [Number(req.params.id)]
+            );
+            if (!rows[0] || !rows[0].photo_data) {
+                res.status(404).end();
+                return;
+            }
+            res.setHeader("Content-Type", rows[0].photo_mime || "image/jpeg");
+            res.setHeader("Cache-Control", "no-store");
+            res.send(rows[0].photo_data);
+        } catch {
+            res.status(500).end();
+        }
+    });
+
     app.get("/api/voitures/liste/", async (req, res) => {
         try {
-            const pool = getPool();
             const { mediaBase } = getBaseUrl(req);
             const [vRes, eRes, aRes] = await Promise.all([
-                pool.query("SELECT * FROM voitures ORDER BY numero_voiture ASC"),
                 pool.query(
-                    `SELECT e.id, e.matricule, e.nom, e.prenom, e.parcours, e.email, e.telephone, e.photo, e.qr_token,
-                  v.id AS voiture_id, v.numero_voiture
-           FROM etudiants e
-           LEFT JOIN affectations a ON a.etudiant = e.id
-           LEFT JOIN voitures v ON v.id = a.voiture`
+                    `SELECT id, numero_voiture, capacite, immatriculation, modele, chauffeur,
+                  telephone_chauffeur, chef_voiture, validee,
+                  (photo_data IS NOT NULL) AS has_photo
+           FROM voitures ORDER BY numero_voiture ASC`
                 ),
-                pool.query("SELECT id, etudiant, voiture FROM affectations ORDER BY id ASC"),
+                pool.query(
+                    `SELECT id, matricule, nom, prenom, parcours, email, telephone,
+                  qr_token, (photo_data IS NOT NULL) AS has_photo
+           FROM etudiants`
+                ),
+                pool.query("SELECT * FROM affectations"),
             ]);
 
-            const etuMap = new Map(eRes.rows.map((e) => [e.id, formatEtudiant(e, mediaBase)]));
+            const etuMap = new Map<number, any>();
+            for (const e of eRes.rows) etuMap.set(e.id, formatEtudiantRow(e, mediaBase));
+
             const enriched = vRes.rows.map((v) => {
                 const affs = aRes.rows.filter((a) => a.voiture === v.id);
                 const chef = v.chef_voiture ? etuMap.get(v.chef_voiture) || null : null;
-                const passagers = affs
-                    .map((a) => etuMap.get(a.etudiant))
-                    .filter((e): e is ReturnType<typeof formatEtudiant> => Boolean(e));
                 return {
-                    ...v,
+                    id: v.id,
+                    numero_voiture: v.numero_voiture,
+                    capacite: v.capacite,
+                    immatriculation: v.immatriculation || "",
+                    modele: v.modele || "",
+                    chauffeur: v.chauffeur || "",
+                    telephone_chauffeur: v.telephone_chauffeur || "",
+                    photo: v.has_photo ? `/api/voitures/${v.id}/photo/` : null,
+                    photo_url: v.has_photo ? `${mediaBase}/api/voitures/${v.id}/photo/` : null,
+                    chef_voiture: v.chef_voiture,
+                    validee: v.validee,
                     chef_voiture_detail: chef,
-                    places_occupees: passagers.length,
-                    places_disponibles: Math.max(0, v.capacite - passagers.length),
-                    etudiants: passagers,
+                    places_occupees: affs.length,
+                    places_disponibles: Math.max(0, v.capacite - affs.length),
+                    etudiants: affs.map((a) => etuMap.get(a.etudiant)).filter(Boolean),
                 };
             });
             res.json(enriched);
@@ -519,84 +538,167 @@ export async function createApp() {
         }
     });
 
-    app.post("/api/voitures/liste/", requireAuth, async (req, res) => {
+    app.post("/api/voitures/liste/", requireAuth, upload.single("photo"), async (req, res) => {
         try {
-            const pool = getPool();
-            const body = req.body || {};
-            const num = Number(body.numero_voiture);
-            const exists = await pool.query("SELECT id FROM voitures WHERE numero_voiture = $1", [num]);
-            if (exists.rows.length > 0) {
-                res.status(400).json({ numero_voiture: ["Ce numéro de voiture existe déjà."] });
+            const { mediaBase } = getBaseUrl(req);
+            const b = req.body || {};
+            const num = Number(b.numero_voiture);
+            if (!Number.isFinite(num) || num < 1) {
+                res.status(400).json({ detail: "Numéro de voiture invalide." });
                 return;
             }
             const { rows } = await pool.query(
-                `INSERT INTO voitures (numero_voiture, capacite, immatriculation, chauffeur, telephone_chauffeur, chef_voiture, validee)
-         VALUES ($1, $2, $3, $4, $5, $6, FALSE)
-         RETURNING *`,
+                `INSERT INTO voitures (numero_voiture, capacite, immatriculation, modele, chauffeur, telephone_chauffeur, photo_data, photo_mime, chef_voiture, validee)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, false)
+         RETURNING id, numero_voiture, capacite, immatriculation, modele, chauffeur, telephone_chauffeur, chef_voiture, validee, (photo_data IS NOT NULL) AS has_photo`,
                 [
                     num,
-                    Number(body.capacite || 26),
-                    body.immatriculation || "",
-                    body.chauffeur || "",
-                    body.telephone_chauffeur || "",
-                    body.chef_voiture ? Number(body.chef_voiture) : null,
+                    Number(b.capacite || 26),
+                    String(b.immatriculation || "").trim(),
+                    String(b.modele || "").trim(),
+                    String(b.chauffeur || "").trim(),
+                    String(b.telephone_chauffeur || "").trim(),
+                    req.file ? req.file.buffer : null,
+                    req.file ? req.file.mimetype : null,
+                    b.chef_voiture ? Number(b.chef_voiture) : null,
                 ]
             );
+            const v = rows[0];
             res.status(201).json({
-                ...rows[0],
+                id: v.id,
+                numero_voiture: v.numero_voiture,
+                capacite: v.capacite,
+                immatriculation: v.immatriculation,
+                modele: v.modele,
+                chauffeur: v.chauffeur,
+                telephone_chauffeur: v.telephone_chauffeur,
+                photo: v.has_photo ? `/api/voitures/${v.id}/photo/` : null,
+                photo_url: v.has_photo ? `${mediaBase}/api/voitures/${v.id}/photo/` : null,
+                chef_voiture: v.chef_voiture,
+                validee: v.validee,
                 chef_voiture_detail: null,
                 places_occupees: 0,
-                places_disponibles: rows[0].capacite,
+                places_disponibles: v.capacite,
                 etudiants: [],
             });
         } catch (err: any) {
+            if (err.code === "23505") {
+                res.status(400).json({ numero_voiture: ["Ce numéro de voiture existe déjà."] });
+                return;
+            }
             res.status(500).json({ detail: err.message });
         }
     });
 
-    app.patch("/api/voitures/liste/:id/", requireAuth, async (req, res) => {
+    app.patch("/api/voitures/liste/:id/", requireAuth, upload.single("photo"), async (req, res) => {
         try {
-            const pool = getPool();
+            const { mediaBase } = getBaseUrl(req);
             const id = Number(req.params.id);
             const b = req.body || {};
-            const { rows } = await pool.query(
-                `UPDATE voitures SET
-          numero_voiture = COALESCE($1, numero_voiture),
-          capacite = COALESCE($2, capacite),
-          immatriculation = COALESCE($3, immatriculation),
-          chauffeur = COALESCE($4, chauffeur),
-          telephone_chauffeur = COALESCE($5, telephone_chauffeur),
-          chef_voiture = COALESCE($6, chef_voiture),
-          validee = COALESCE($7, validee)
-         WHERE id = $8
-         RETURNING *`,
-                [
-                    b.numero_voiture !== undefined ? Number(b.numero_voiture) : null,
-                    b.capacite !== undefined ? Number(b.capacite) : null,
-                    b.immatriculation ?? null,
-                    b.chauffeur ?? null,
-                    b.telephone_chauffeur ?? null,
-                    b.chef_voiture !== undefined ? (b.chef_voiture ? Number(b.chef_voiture) : null) : null,
-                    b.validee !== undefined ? Boolean(b.validee) : null,
-                    id,
-                ]
-            );
+            const removePhoto = b.remove_photo === "true" || b.remove_photo === true;
+
+            let rows;
+            if (req.file) {
+                ({ rows } = await pool.query(
+                    `UPDATE voitures SET
+             numero_voiture = COALESCE($1, numero_voiture),
+             capacite = COALESCE($2, capacite),
+             immatriculation = COALESCE($3, immatriculation),
+             modele = COALESCE($4, modele),
+             chauffeur = COALESCE($5, chauffeur),
+             telephone_chauffeur = COALESCE($6, telephone_chauffeur),
+             photo_data = $7,
+             photo_mime = $8
+           WHERE id = $9
+           RETURNING id, numero_voiture, capacite, immatriculation, modele, chauffeur, telephone_chauffeur, chef_voiture, validee, (photo_data IS NOT NULL) AS has_photo`,
+                    [
+                        b.numero_voiture !== undefined ? Number(b.numero_voiture) : null,
+                        b.capacite !== undefined ? Number(b.capacite) : null,
+                        b.immatriculation !== undefined ? String(b.immatriculation).trim() : null,
+                        b.modele !== undefined ? String(b.modele).trim() : null,
+                        b.chauffeur !== undefined ? String(b.chauffeur).trim() : null,
+                        b.telephone_chauffeur !== undefined ? String(b.telephone_chauffeur).trim() : null,
+                        req.file.buffer,
+                        req.file.mimetype,
+                        id,
+                    ]
+                ));
+            } else if (removePhoto) {
+                ({ rows } = await pool.query(
+                    `UPDATE voitures SET
+             numero_voiture = COALESCE($1, numero_voiture),
+             capacite = COALESCE($2, capacite),
+             immatriculation = COALESCE($3, immatriculation),
+             modele = COALESCE($4, modele),
+             chauffeur = COALESCE($5, chauffeur),
+             telephone_chauffeur = COALESCE($6, telephone_chauffeur),
+             photo_data = NULL,
+             photo_mime = NULL
+           WHERE id = $7
+           RETURNING id, numero_voiture, capacite, immatriculation, modele, chauffeur, telephone_chauffeur, chef_voiture, validee, (photo_data IS NOT NULL) AS has_photo`,
+                    [
+                        b.numero_voiture !== undefined ? Number(b.numero_voiture) : null,
+                        b.capacite !== undefined ? Number(b.capacite) : null,
+                        b.immatriculation !== undefined ? String(b.immatriculation).trim() : null,
+                        b.modele !== undefined ? String(b.modele).trim() : null,
+                        b.chauffeur !== undefined ? String(b.chauffeur).trim() : null,
+                        b.telephone_chauffeur !== undefined ? String(b.telephone_chauffeur).trim() : null,
+                        id,
+                    ]
+                ));
+            } else {
+                ({ rows } = await pool.query(
+                    `UPDATE voitures SET
+             numero_voiture = COALESCE($1, numero_voiture),
+             capacite = COALESCE($2, capacite),
+             immatriculation = COALESCE($3, immatriculation),
+             modele = COALESCE($4, modele),
+             chauffeur = COALESCE($5, chauffeur),
+             telephone_chauffeur = COALESCE($6, telephone_chauffeur)
+           WHERE id = $7
+           RETURNING id, numero_voiture, capacite, immatriculation, modele, chauffeur, telephone_chauffeur, chef_voiture, validee, (photo_data IS NOT NULL) AS has_photo`,
+                    [
+                        b.numero_voiture !== undefined ? Number(b.numero_voiture) : null,
+                        b.capacite !== undefined ? Number(b.capacite) : null,
+                        b.immatriculation !== undefined ? String(b.immatriculation).trim() : null,
+                        b.modele !== undefined ? String(b.modele).trim() : null,
+                        b.chauffeur !== undefined ? String(b.chauffeur).trim() : null,
+                        b.telephone_chauffeur !== undefined ? String(b.telephone_chauffeur).trim() : null,
+                        id,
+                    ]
+                ));
+            }
+
             if (!rows[0]) {
                 res.status(404).json({ detail: "Voiture introuvable." });
                 return;
             }
-            res.json(rows[0]);
+            const v = rows[0];
+            res.json({
+                id: v.id,
+                numero_voiture: v.numero_voiture,
+                capacite: v.capacite,
+                immatriculation: v.immatriculation,
+                modele: v.modele,
+                chauffeur: v.chauffeur,
+                telephone_chauffeur: v.telephone_chauffeur,
+                photo: v.has_photo ? `/api/voitures/${v.id}/photo/` : null,
+                photo_url: v.has_photo ? `${mediaBase}/api/voitures/${v.id}/photo/` : null,
+                chef_voiture: v.chef_voiture,
+                validee: v.validee,
+            });
         } catch (err: any) {
+            if (err.code === "23505") {
+                res.status(400).json({ numero_voiture: ["Ce numéro de voiture existe déjà."] });
+                return;
+            }
             res.status(500).json({ detail: err.message });
         }
     });
 
     app.delete("/api/voitures/liste/:id/", requireAuth, async (req, res) => {
         try {
-            const pool = getPool();
-            const result = await pool.query("DELETE FROM voitures WHERE id = $1", [
-                Number(req.params.id),
-            ]);
+            const result = await pool.query("DELETE FROM voitures WHERE id = $1", [Number(req.params.id)]);
             if (result.rowCount === 0) {
                 res.status(404).json({ detail: "Voiture introuvable." });
                 return;
@@ -609,7 +711,6 @@ export async function createApp() {
 
     app.post("/api/voitures/liste/:id/designer_chef/", requireAuth, async (req, res) => {
         try {
-            const pool = getPool();
             const id = Number(req.params.id);
             const etudiantId = Number(req.body.etudiant);
             const vRes = await pool.query("SELECT * FROM voitures WHERE id = $1", [id]);
@@ -618,28 +719,19 @@ export async function createApp() {
                 res.status(404).json({ detail: "Voiture introuvable." });
                 return;
             }
-
-            const affRes = await pool.query("SELECT * FROM affectations WHERE etudiant = $1", [etudiantId]);
-            const existingAff = affRes.rows[0];
-            if (existingAff && existingAff.voiture !== id) {
+            const existing = await pool.query("SELECT * FROM affectations WHERE etudiant = $1", [etudiantId]);
+            if (existing.rows[0] && existing.rows[0].voiture !== id) {
                 res.status(400).json({ detail: "Cet étudiant est déjà affecté à une autre voiture." });
                 return;
             }
-            if (!existingAff) {
-                const occRes = await pool.query(
-                    "SELECT COUNT(*)::int AS cnt FROM affectations WHERE voiture = $1",
-                    [id]
-                );
-                if (occRes.rows[0].cnt >= voiture.capacite) {
+            if (!existing.rows[0]) {
+                const countRes = await pool.query("SELECT COUNT(*)::int AS cnt FROM affectations WHERE voiture = $1", [id]);
+                if (countRes.rows[0].cnt >= voiture.capacite) {
                     res.status(400).json({ detail: `La voiture N°${voiture.numero_voiture} est pleine.` });
                     return;
                 }
-                await pool.query("INSERT INTO affectations (etudiant, voiture) VALUES ($1, $2)", [
-                    etudiantId,
-                    id,
-                ]);
+                await pool.query("INSERT INTO affectations (etudiant, voiture) VALUES ($1, $2)", [etudiantId, id]);
             }
-
             await pool.query("UPDATE voitures SET chef_voiture = $1 WHERE id = $2", [etudiantId, id]);
             res.json({ detail: "Chef de voiture désigné.", chef_voiture: etudiantId });
         } catch (err: any) {
@@ -649,7 +741,6 @@ export async function createApp() {
 
     app.post("/api/voitures/liste/:id/valider/", requireAuth, async (req, res) => {
         try {
-            const pool = getPool();
             const id = Number(req.params.id);
             const vRes = await pool.query("SELECT * FROM voitures WHERE id = $1", [id]);
             const voiture = vRes.rows[0];
@@ -657,35 +748,23 @@ export async function createApp() {
                 res.status(404).json({ detail: "Voiture introuvable." });
                 return;
             }
-
             const validee = req.body?.validee !== undefined ? Boolean(req.body.validee) : true;
-            const affsRes = await pool.query(
-                "SELECT etudiant FROM affectations WHERE voiture = $1 ORDER BY id ASC",
-                [id]
-            );
-            if (validee && affsRes.rows.length === 0) {
+            const affRes = await pool.query("SELECT * FROM affectations WHERE voiture = $1 ORDER BY id ASC", [id]);
+            if (validee && affRes.rows.length === 0) {
                 res.status(400).json({ detail: "Impossible de valider une voiture vide." });
                 return;
             }
-
-            let chefId = voiture.chef_voiture;
+            let nextChef = voiture.chef_voiture;
             if (req.body?.chef_voiture) {
-                chefId = Number(req.body.chef_voiture);
-            } else if (validee && !chefId && affsRes.rows.length > 0) {
-                chefId = affsRes.rows[0].etudiant;
+                nextChef = Number(req.body.chef_voiture);
+            } else if (validee && !nextChef && affRes.rows.length > 0) {
+                nextChef = affRes.rows[0].etudiant;
             }
-
-            await pool.query("UPDATE voitures SET validee = $1, chef_voiture = $2 WHERE id = $3", [
-                validee,
-                chefId,
-                id,
-            ]);
+            await pool.query("UPDATE voitures SET validee = $1, chef_voiture = $2 WHERE id = $3", [validee, nextChef, id]);
             res.json({
-                detail: validee
-                    ? `Voiture N°${voiture.numero_voiture} validée.`
-                    : `Voiture N°${voiture.numero_voiture} rouverte.`,
+                detail: validee ? `Voiture N°${voiture.numero_voiture} validée.` : `Voiture N°${voiture.numero_voiture} rouverte.`,
                 validee,
-                chef_voiture: chefId,
+                chef_voiture: nextChef,
             });
         } catch (err: any) {
             res.status(500).json({ detail: err.message });
@@ -694,7 +773,6 @@ export async function createApp() {
 
     app.post("/api/voitures/liste/:id/embarquer/", async (req, res) => {
         try {
-            const pool = getPool();
             const id = Number(req.params.id);
             const etudiantId = Number(req.body.etudiant);
             const vRes = await pool.query("SELECT * FROM voitures WHERE id = $1", [id]);
@@ -707,44 +785,37 @@ export async function createApp() {
                 res.status(400).json({ detail: "Cette voiture est déjà validée par l'administration." });
                 return;
             }
-            const already = await pool.query("SELECT id FROM affectations WHERE etudiant = $1", [
-                etudiantId,
-            ]);
-            if (already.rows.length > 0) {
+            const existing = await pool.query("SELECT 1 FROM affectations WHERE etudiant = $1", [etudiantId]);
+            if (existing.rows.length > 0) {
                 res.status(400).json({ detail: "Cet étudiant est déjà affecté à une voiture." });
                 return;
             }
-            const occRes = await pool.query(
-                "SELECT COUNT(*)::int AS cnt FROM affectations WHERE voiture = $1",
-                [id]
-            );
-            if (occRes.rows[0].cnt >= voiture.capacite) {
+            const countRes = await pool.query("SELECT COUNT(*)::int AS cnt FROM affectations WHERE voiture = $1", [id]);
+            if (countRes.rows[0].cnt >= voiture.capacite) {
                 res.status(400).json({ detail: `La voiture N°${voiture.numero_voiture} est complète.` });
                 return;
             }
-
-            const { rows } = await pool.query(
-                "INSERT INTO affectations (etudiant, voiture) VALUES ($1, $2) RETURNING id, etudiant, voiture",
+            const created = await pool.query(
+                "INSERT INTO affectations (etudiant, voiture) VALUES ($1, $2) RETURNING *",
                 [etudiantId, id]
             );
             if (!voiture.chef_voiture) {
                 await pool.query("UPDATE voitures SET chef_voiture = $1 WHERE id = $2", [etudiantId, id]);
             }
-            res.status(201).json(rows[0]);
+            res.status(201).json(created.rows[0]);
         } catch (err: any) {
             res.status(500).json({ detail: err.message });
         }
     });
 
     app.post("/api/voitures/liste/auto_affecter/", requireAuth, async (_req, res) => {
-        const pool = getPool();
-        const client = await pool.connect();
         try {
-            await client.query("BEGIN");
-            const unassignedRes = await client.query(
-                "SELECT id FROM etudiants WHERE id NOT IN (SELECT etudiant FROM affectations) ORDER BY id ASC"
+            const unassignedRes = await pool.query(
+                `SELECT e.id FROM etudiants e
+         LEFT JOIN affectations a ON a.etudiant = e.id
+         WHERE a.id IS NULL ORDER BY e.id ASC`
             );
-            const voituresRes = await client.query(
+            const voituresRes = await pool.query(
                 `SELECT v.id, v.capacite, v.validee, v.chef_voiture, COUNT(a.id)::int AS occ
          FROM voitures v
          LEFT JOIN affectations a ON a.voiture = v.id
@@ -757,60 +828,49 @@ export async function createApp() {
             for (const etu of unassignedRes.rows) {
                 const target = cars.find((v) => !v.validee && v.occ < v.capacite);
                 if (!target) break;
-                await client.query("INSERT INTO affectations (etudiant, voiture) VALUES ($1, $2)", [
-                    etu.id,
-                    target.id,
-                ]);
-                target.occ++;
+                await pool.query("INSERT INTO affectations (etudiant, voiture) VALUES ($1, $2)", [etu.id, target.id]);
+                target.occ += 1;
                 if (!target.chef_voiture) {
                     target.chef_voiture = etu.id;
-                    await client.query("UPDATE voitures SET chef_voiture = $1 WHERE id = $2", [
-                        etu.id,
-                        target.id,
-                    ]);
+                    await pool.query("UPDATE voitures SET chef_voiture = $1 WHERE id = $2", [etu.id, target.id]);
                 }
                 count++;
             }
 
-            await client.query("COMMIT");
             res.json({
                 affectes: count,
                 restants: unassignedRes.rows.length - count,
                 message: `${count} étudiant(s) affecté(s) automatiquement.`,
             });
         } catch (err: any) {
-            await client.query("ROLLBACK");
             res.status(500).json({ detail: err.message });
-        } finally {
-            client.release();
         }
     });
 
     // ============ AFFECTATIONS ============
     app.get("/api/voitures/affectations/", async (req, res) => {
         try {
-            const pool = getPool();
             const { mediaBase } = getBaseUrl(req);
             const [aRes, eRes, vRes] = await Promise.all([
-                pool.query("SELECT id, etudiant, voiture FROM affectations ORDER BY id DESC"),
+                pool.query("SELECT * FROM affectations ORDER BY id ASC"),
                 pool.query(
-                    `SELECT e.id, e.matricule, e.nom, e.prenom, e.parcours, e.email, e.telephone, e.photo, e.qr_token,
-                  v.id AS voiture_id, v.numero_voiture
-           FROM etudiants e
-           LEFT JOIN affectations a ON a.etudiant = e.id
-           LEFT JOIN voitures v ON v.id = a.voiture`
+                    `SELECT id, matricule, nom, prenom, parcours, email, telephone, qr_token, (photo_data IS NOT NULL) AS has_photo
+           FROM etudiants`
                 ),
-                pool.query("SELECT * FROM voitures"),
+                pool.query(
+                    `SELECT id, numero_voiture, capacite, immatriculation, modele, chauffeur, telephone_chauffeur, chef_voiture, validee
+           FROM voitures`
+                ),
             ]);
 
-            const etuMap = new Map(eRes.rows.map((e) => [e.id, formatEtudiant(e, mediaBase)]));
-            const voiMap = new Map(vRes.rows.map((v) => [v.id, v]));
+            const etuMap = new Map<number, any>();
+            for (const e of eRes.rows) etuMap.set(e.id, formatEtudiantRow(e, mediaBase));
+            const voiMap = new Map<number, any>();
+            for (const v of vRes.rows) voiMap.set(v.id, v);
 
             res.json(
                 aRes.rows.map((a) => ({
-                    id: a.id,
-                    etudiant: a.etudiant,
-                    voiture: a.voiture,
+                    ...a,
                     etudiant_detail: etuMap.get(a.etudiant) || null,
                     voiture_detail: voiMap.get(a.voiture) || null,
                 }))
@@ -822,10 +882,8 @@ export async function createApp() {
 
     app.post("/api/voitures/affectations/", async (req, res) => {
         try {
-            const pool = getPool();
             const etudiantId = Number(req.body.etudiant);
             const voitureId = Number(req.body.voiture);
-
             const vRes = await pool.query("SELECT * FROM voitures WHERE id = $1", [voitureId]);
             const voiture = vRes.rows[0];
             if (!voiture) {
@@ -836,33 +894,24 @@ export async function createApp() {
                 res.status(400).json({ detail: `La voiture N°${voiture.numero_voiture} est déjà validée.` });
                 return;
             }
-            const already = await pool.query("SELECT id FROM affectations WHERE etudiant = $1", [
-                etudiantId,
-            ]);
-            if (already.rows.length > 0) {
+            const existing = await pool.query("SELECT 1 FROM affectations WHERE etudiant = $1", [etudiantId]);
+            if (existing.rows.length > 0) {
                 res.status(400).json({ detail: "Cet étudiant est déjà affecté à une voiture." });
                 return;
             }
-            const occRes = await pool.query(
-                "SELECT COUNT(*)::int AS cnt FROM affectations WHERE voiture = $1",
-                [voitureId]
-            );
-            if (occRes.rows[0].cnt >= voiture.capacite) {
+            const countRes = await pool.query("SELECT COUNT(*)::int AS cnt FROM affectations WHERE voiture = $1", [voitureId]);
+            if (countRes.rows[0].cnt >= voiture.capacite) {
                 res.status(400).json({ detail: `La voiture N°${voiture.numero_voiture} est pleine.` });
                 return;
             }
-
-            const { rows } = await pool.query(
-                "INSERT INTO affectations (etudiant, voiture) VALUES ($1, $2) RETURNING id, etudiant, voiture",
+            const created = await pool.query(
+                "INSERT INTO affectations (etudiant, voiture) VALUES ($1, $2) RETURNING *",
                 [etudiantId, voitureId]
             );
             if (!voiture.chef_voiture) {
-                await pool.query("UPDATE voitures SET chef_voiture = $1 WHERE id = $2", [
-                    etudiantId,
-                    voitureId,
-                ]);
+                await pool.query("UPDATE voitures SET chef_voiture = $1 WHERE id = $2", [etudiantId, voitureId]);
             }
-            res.status(201).json(rows[0]);
+            res.status(201).json(created.rows[0]);
         } catch (err: any) {
             res.status(500).json({ detail: err.message });
         }
@@ -870,7 +919,6 @@ export async function createApp() {
 
     app.delete("/api/voitures/affectations/:id/", async (req, res) => {
         try {
-            const pool = getPool();
             const id = Number(req.params.id);
             const affRes = await pool.query("SELECT * FROM affectations WHERE id = $1", [id]);
             const aff = affRes.rows[0];
@@ -881,20 +929,17 @@ export async function createApp() {
             const vRes = await pool.query("SELECT * FROM voitures WHERE id = $1", [aff.voiture]);
             const voiture = vRes.rows[0];
             if (voiture?.validee) {
-                res.status(400).json({
-                    detail: "Impossible de retirer un étudiant d'une voiture déjà validée.",
-                });
+                res.status(400).json({ detail: "Impossible de retirer un étudiant d'une voiture déjà validée." });
                 return;
             }
-
             await pool.query("DELETE FROM affectations WHERE id = $1", [id]);
             if (voiture && voiture.chef_voiture === aff.etudiant) {
-                const rem = await pool.query(
+                const nextPass = await pool.query(
                     "SELECT etudiant FROM affectations WHERE voiture = $1 ORDER BY id ASC LIMIT 1",
                     [voiture.id]
                 );
                 await pool.query("UPDATE voitures SET chef_voiture = $1 WHERE id = $2", [
-                    rem.rows[0]?.etudiant ?? null,
+                    nextPass.rows[0]?.etudiant ?? null,
                     voiture.id,
                 ]);
             }
@@ -919,55 +964,57 @@ export async function createApp() {
                 return;
             }
 
-            const pool = getPool();
             const [pRes, eRes, vRes, aRes, progRes] = await Promise.all([
-                pool.query("SELECT * FROM parametres_voyage WHERE id = 1"),
+                pool.query("SELECT * FROM parametres_voyage ORDER BY id ASC LIMIT 1"),
                 pool.query("SELECT id, matricule, nom, prenom, parcours, telephone, email FROM etudiants ORDER BY id ASC"),
-                pool.query("SELECT * FROM voitures ORDER BY numero_voiture ASC"),
-                pool.query("SELECT etudiant, voiture FROM affectations"),
-                pool.query("SELECT jour, periode, heure_debut, heure_fin, activite, lieu FROM programme_items ORDER BY jour ASC, heure_debut ASC"),
+                pool.query("SELECT id, numero_voiture, capacite, immatriculation, modele, chauffeur, telephone_chauffeur, chef_voiture, validee FROM voitures ORDER BY numero_voiture ASC"),
+                pool.query("SELECT * FROM affectations"),
+                pool.query("SELECT * FROM programme_items ORDER BY jour ASC, heure_debut ASC"),
             ]);
 
-            const affByStudent = new Map(aRes.rows.map((a) => [a.etudiant, a.voiture]));
-            const voitureById = new Map(vRes.rows.map((v) => [v.id, v]));
-            const studentById = new Map(eRes.rows.map((e) => [e.id, e]));
-
+            const assignedIds = new Set(aRes.rows.map((a) => a.etudiant));
             const dbSnapshot = {
                 statistiques: {
                     total_etudiants: eRes.rows.length,
-                    total_affectes: aRes.rows.length,
-                    total_non_affectes: eRes.rows.length - aRes.rows.length,
+                    total_affectes: assignedIds.size,
+                    total_non_affectes: eRes.rows.length - assignedIds.size,
                     total_voitures: vRes.rows.length,
                     voitures_validees: vRes.rows.filter((v) => v.validee).length,
                 },
                 parametres: pRes.rows[0] || null,
                 etudiants: eRes.rows.map((e) => {
-                    const vId = affByStudent.get(e.id);
-                    const v = vId ? voitureById.get(vId) : null;
+                    const aff = aRes.rows.find((a) => a.etudiant === e.id);
+                    const voiture = aff ? vRes.rows.find((v) => v.id === aff.voiture) : null;
                     return {
                         ...e,
-                        voiture_numero: v ? v.numero_voiture : null,
-                        est_chef_de_voiture: v ? v.chef_voiture === e.id : false,
+                        voiture_numero: voiture ? voiture.numero_voiture : null,
+                        est_chef_de_voiture: voiture ? voiture.chef_voiture === e.id : false,
                     };
                 }),
                 voitures: vRes.rows.map((v) => {
-                    const passagers = aRes.rows
-                        .filter((a) => a.voiture === v.id)
-                        .map((a) => studentById.get(a.etudiant))
-                        .filter(Boolean);
-                    const chef = v.chef_voiture ? studentById.get(v.chef_voiture) : null;
+                    const affs = aRes.rows.filter((a) => a.voiture === v.id);
+                    const chef = v.chef_voiture ? eRes.rows.find((e) => e.id === v.chef_voiture) : null;
+                    const passagers = affs
+                        .map((a) => eRes.rows.find((e) => e.id === a.etudiant))
+                        .filter(Boolean)
+                        .map((e) => ({
+                            matricule: e.matricule,
+                            nom: e.nom,
+                            prenom: e.prenom,
+                            parcours: e.parcours,
+                            telephone: e.telephone,
+                        }));
                     return {
                         numero_voiture: v.numero_voiture,
                         immatriculation: v.immatriculation,
+                        modele: v.modele,
                         chauffeur: v.chauffeur,
                         telephone_chauffeur: v.telephone_chauffeur,
                         capacite: v.capacite,
                         places_occupees: passagers.length,
                         places_disponibles: Math.max(0, v.capacite - passagers.length),
                         validee_par_admin: v.validee,
-                        chef_voiture: chef
-                            ? { matricule: chef.matricule, nom: chef.nom, prenom: chef.prenom, telephone: chef.telephone }
-                            : null,
+                        chef_voiture: chef ? { matricule: chef.matricule, nom: chef.nom, prenom: chef.prenom, telephone: chef.telephone } : null,
                         passagers,
                     };
                 }),
@@ -987,7 +1034,8 @@ export async function createApp() {
                 "Tu es l'Agent IA officiel de VoyageE — ENI (École Nationale d'Informatique).",
                 "Tu aides les administrateurs et les responsables (chefs de voiture) à consulter instantanément toutes les informations du voyage d'étude.",
                 "Réponds toujours en français, de manière claire, précise et structurée.",
-                "RÈGLE STRICTE : Base tes réponses UNIQUEMENT sur les données JSON en direct de la base fournies ci-dessous. N'invente jamais un matricule, un nom, un numéro de voiture ou un horaire.",
+                "FORMATAGE OBLIGATOIRE : Rédige tes réponses en texte brut lisible et aéré. N'utilise JAMAIS de syntaxe Markdown : aucun astérisque (** ou *), aucun dièse (#), aucun backtick (`). Utilise uniquement des sauts de ligne, des tirets (-) ou des numéros (1., 2.).",
+                "RÈGLE STRICTE : Base tes réponses UNIQUEMENT sur les données JSON en direct de la base fournies ci-dessous. N'invente jamais un matricule, un nom, un numéro de voiture ou un horaire. Si un matricule ou une information n'existe pas dans la base, dis-le clairement.",
                 `DONNÉES EN DIRECT DE LA BASE :\n${JSON.stringify(dbSnapshot, null, 2)}`,
             ].join("\n\n");
 
@@ -996,51 +1044,53 @@ export async function createApp() {
                 : question;
 
             const response = await ai.models.generateContent({
-                model: "gemini-3.6-flash",
+                model: process.env.GEMINI_MODEL || "gemini-3.6-flash",
                 contents: prompt,
                 config: { systemInstruction },
             });
 
-            res.json({ reply: response.text || "Aucune réponse générée." });
+            res.json({
+                reply: cleanAiReply(response.text || "Aucune réponse générée."),
+            });
         } catch (err: any) {
             res.status(500).json({ detail: err.message || "Erreur Agent IA." });
         }
     });
 
-    // ============ BADGES ============
+    // ============ BADGES & PDF ============
     app.get("/api/badges/:uuid/info/", async (req, res) => {
         try {
-            const pool = getPool();
             const { frontend, mediaBase } = getBaseUrl(req);
-            const { rows } = await pool.query(
-                `SELECT e.id, e.matricule, e.nom, e.prenom, e.parcours, e.email, e.telephone, e.photo, e.qr_token,
-                v.id AS voiture_id, v.numero_voiture
-         FROM etudiants e
-         LEFT JOIN affectations a ON a.etudiant = e.id
-         LEFT JOIN voitures v ON v.id = a.voiture
-         WHERE e.qr_token = $1`,
+            const eRes = await pool.query(
+                `SELECT id, matricule, nom, prenom, parcours, email, telephone, qr_token, (photo_data IS NOT NULL) AS has_photo
+         FROM etudiants WHERE qr_token = $1`,
                 [req.params.uuid]
             );
-            if (!rows[0]) {
+            const etu = eRes.rows[0];
+            if (!etu) {
                 res.status(404).json({ detail: "Badge introuvable." });
                 return;
             }
-            const etuRow = rows[0];
             const [vRes, progRes, paramRes] = await Promise.all([
-                etuRow.voiture_id
-                    ? pool.query("SELECT * FROM voitures WHERE id = $1", [etuRow.voiture_id])
-                    : Promise.resolve({ rows: [] }),
+                pool.query(
+                    `SELECT v.id, v.numero_voiture, v.capacite, v.immatriculation, v.modele, v.chauffeur, v.telephone_chauffeur, v.chef_voiture, v.validee
+           FROM affectations a JOIN voitures v ON v.id = a.voiture WHERE a.etudiant = $1`,
+                    [etu.id]
+                ),
                 pool.query("SELECT * FROM programme_items ORDER BY jour ASC, heure_debut ASC"),
-                pool.query("SELECT * FROM parametres_voyage WHERE id = 1"),
+                pool.query("SELECT * FROM parametres_voyage ORDER BY id ASC LIMIT 1"),
             ]);
-
+            const voiture = vRes.rows[0] || null;
             res.json({
-                etudiant: formatEtudiant(etuRow, mediaBase),
-                voiture: vRes.rows[0] || null,
+                etudiant: formatEtudiantRow(
+                    { ...etu, voiture_id: voiture?.id ?? null, voiture_numero: voiture?.numero_voiture ?? null },
+                    mediaBase
+                ),
+                voiture,
                 programme: progRes.rows,
-                parametres: paramRes.rows[0],
-                qr_url: `${mediaBase}/api/badges/${etuRow.qr_token}/qr/`,
-                badge_public_url: `${frontend}/badge/${etuRow.qr_token}`,
+                parametres: paramRes.rows[0] || null,
+                qr_url: `${mediaBase}/api/badges/${etu.qr_token}/qr/`,
+                badge_public_url: `${frontend}/badge/${etu.qr_token}`,
             });
         } catch (err: any) {
             res.status(500).json({ detail: err.message });
@@ -1049,16 +1099,13 @@ export async function createApp() {
 
     app.get("/api/badges/:uuid/qr/", async (req, res) => {
         try {
-            const pool = getPool();
             const { frontend } = getBaseUrl(req);
-            const { rows } = await pool.query("SELECT qr_token FROM etudiants WHERE qr_token = $1", [
-                req.params.uuid,
-            ]);
-            if (!rows[0]) {
+            const eRes = await pool.query("SELECT qr_token FROM etudiants WHERE qr_token = $1", [req.params.uuid]);
+            if (!eRes.rows[0]) {
                 res.status(404).json({ detail: "Badge introuvable." });
                 return;
             }
-            const pngBuffer = await QRCode.toBuffer(`${frontend}/badge/${rows[0].qr_token}`, {
+            const pngBuffer = await QRCode.toBuffer(`${frontend}/badge/${eRes.rows[0].qr_token}`, {
                 type: "png",
                 width: 320,
                 margin: 2,
@@ -1074,28 +1121,30 @@ export async function createApp() {
 
     app.get("/api/badges/:uuid/pdf/", async (req, res) => {
         try {
-            const pool = getPool();
             const { frontend } = getBaseUrl(req);
-            const { rows } = await pool.query(
-                `SELECT e.*, v.numero_voiture
-         FROM etudiants e
-         LEFT JOIN affectations a ON a.etudiant = e.id
-         LEFT JOIN voitures v ON v.id = a.voiture
-         WHERE e.qr_token = $1`,
-                [req.params.uuid]
-            );
-            const etu = rows[0];
+            const eRes = await pool.query("SELECT * FROM etudiants WHERE qr_token = $1", [req.params.uuid]);
+            const etu = eRes.rows[0];
             if (!etu) {
                 res.status(404).json({ detail: "Badge introuvable." });
                 return;
             }
-
-            const [progRes, paramRes] = await Promise.all([
+            const [vRes, progRes, paramRes] = await Promise.all([
+                pool.query("SELECT v.* FROM affectations a JOIN voitures v ON v.id = a.voiture WHERE a.etudiant = $1", [etu.id]),
                 pool.query("SELECT * FROM programme_items ORDER BY jour ASC, heure_debut ASC"),
-                pool.query("SELECT * FROM parametres_voyage WHERE id = 1"),
+                pool.query("SELECT * FROM parametres_voyage ORDER BY id ASC LIMIT 1"),
             ]);
-            const parametres = paramRes.rows[0];
+            const voiture = vRes.rows[0] || null;
             const sortedProgramme = progRes.rows;
+            const parametres = paramRes.rows[0] || {
+                destination: "TOLIARA",
+                ecole: "ENI",
+                annee_promotion: "2025-2026",
+                nom_responsable: "",
+                tel_responsable: "",
+                nom_responsable_sante: "",
+                tel_responsable_sante: "",
+            };
+
             const qrBuffer = await QRCode.toBuffer(`${frontend}/badge/${etu.qr_token}`, {
                 type: "png",
                 width: 240,
@@ -1125,7 +1174,7 @@ export async function createApp() {
 
             doc.roundedRect(18, doc.page.height - 54, doc.page.width - 36, 36, 6).fill("#facc15");
             doc.fillColor("#14532d").fontSize(14).font("Helvetica-Bold").text(
-                etu.numero_voiture ? `VOITURE N° ${etu.numero_voiture}` : "VOITURE NON AFFECTÉE",
+                voiture ? `VOITURE N° ${voiture.numero_voiture}` : "VOITURE NON AFFECTÉE",
                 18,
                 doc.page.height - 42,
                 { width: doc.page.width - 36, align: "center" }
@@ -1141,7 +1190,7 @@ export async function createApp() {
 
             doc.roundedRect(50, 114, doc.page.width - 100, 26, 5).fill("#dcfce7");
             doc.fillColor("#14532d").fontSize(11).font("Helvetica-Bold").text(
-                etu.numero_voiture ? `VOITURE V${etu.numero_voiture}` : "NON AFFECTÉ",
+                voiture ? `VOITURE V${voiture.numero_voiture}` : "NON AFFECTÉ",
                 50,
                 121,
                 { width: doc.page.width - 100, align: "center" }
@@ -1159,6 +1208,7 @@ export async function createApp() {
         }
     });
 
+    // ============ VITE EN LOCAL UNIQUEMENT ============
     if (process.env.NODE_ENV !== "production" && !process.env.VERCEL) {
         const { createServer: createViteServer } = await import("vite");
         const vite = await createViteServer({
@@ -1166,28 +1216,26 @@ export async function createApp() {
             appType: "spa",
         });
         app.use(vite.middlewares);
+    } else if (!process.env.VERCEL) {
+        const distPath = path.resolve(process.cwd(), "dist");
+        app.use(express.static(distPath));
+        app.get("*", (_req, res) => {
+            res.sendFile(path.join(distPath, "index.html"));
+        });
     }
 
+    cachedApp = app;
     return app;
 }
 
-let appPromise: ReturnType<typeof createApp> | null = null;
-
 export default async function handler(req: IncomingMessage, res: ServerResponse) {
     try {
-        if (!appPromise) {
-            appPromise = createApp();
-        }
-        const app = await appPromise;
+        const app = await createApp();
         return app(req, res);
-    } catch (err) {
+    } catch (err: any) {
         console.error("Vercel handler error:", err);
         res.statusCode = 500;
         res.setHeader("Content-Type", "application/json");
-        res.end(
-            JSON.stringify({
-                detail: err instanceof Error ? err.message : String(err),
-            })
-        );
+        res.end(JSON.stringify({ detail: err?.message || "Server initialization error" }));
     }
 }

@@ -43,11 +43,14 @@ export interface Voiture {
   numero_voiture: number;
   capacite: number;
   immatriculation: string;
+  modele?: string;
   chauffeur: string;
   telephone_chauffeur: string;
-  validee?: boolean;
+  photo?: string | null;
+  photo_url?: string | null;
   chef_voiture?: number | null;
   chef_voiture_detail?: Etudiant | null;
+  validee?: boolean;
   places_occupees?: number;
   places_disponibles?: number;
   etudiants?: Etudiant[];
