@@ -14,6 +14,9 @@ axiosClient.interceptors.request.use((config) => {
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
   }
+  if (config.data instanceof FormData && config.headers) {
+    delete config.headers["Content-Type"];
+  }
   return config;
 });
 
@@ -32,7 +35,10 @@ axiosClient.interceptors.response.use(
 );
 
 export const getPublicBackendUrl = () => {
-  return import.meta.env.VITE_PUBLIC_BACKEND_URL || window.location.origin;
+  const configured = (import.meta.env.VITE_PUBLIC_BACKEND_URL || "")
+    .trim()
+    .replace(/\/$/, "");
+  return /^https?:\/\/.+/i.test(configured) ? configured : "";
 };
 
 export default axiosClient;

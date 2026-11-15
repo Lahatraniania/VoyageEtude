@@ -20,12 +20,11 @@ function getGeminiClient() {
   });
 }
 
-const PORT = 3000;
-
 // ✅ VERCEL : Sur Vercel, seul /tmp est inscriptible. En local, on garde uploads/.
-const UPLOAD_DIR = process.env.VERCEL
-  ? "/tmp/uploads/etudiants/photos"
-  : path.resolve(process.cwd(), "uploads", "etudiants", "photos");
+const MEDIA_ROOT = process.env.VERCEL
+  ? "/tmp/uploads"
+  : path.resolve(process.cwd(), "uploads");
+const UPLOAD_DIR = path.join(MEDIA_ROOT, "etudiants", "photos");
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 const storage = multer.diskStorage({
@@ -98,7 +97,33 @@ const ADMIN_USER = {
   last_name: "ENI",
 };
 
-const VALID_TOKENS = new Set<string>();
+// ✅ VERCEL : Tokens signés HMAC-SHA256 (vérifiables par toutes les instances sans RAM partagée)
+const AUTH_SECRET =
+  process.env.AUTH_SECRET ||
+  `${ADMIN_USER.username}:${ADMIN_USER.password}:voyagee-eni-secret`;
+
+function createSignedToken(type: "access" | "refresh"): string {
+  const payload = Buffer.from(
+    JSON.stringify({ sub: ADMIN_USER.username, type, iat: Date.now() })
+  ).toString("base64url");
+  const sig = crypto
+    .createHmac("sha256", AUTH_SECRET)
+    .update(payload)
+    .digest("base64url");
+  return `${payload}.${sig}`;
+}
+
+function verifySignedToken(token: string): boolean {
+  const parts = token.split(".");
+  if (parts.length !== 2) return false;
+  const [payload, sig] = parts;
+  const expected = crypto
+    .createHmac("sha256", AUTH_SECRET)
+    .update(payload)
+    .digest("base64url");
+  if (sig.length !== expected.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
+}
 
 let parametres: ParametresVoyage = {
   id: 1,
@@ -159,19 +184,33 @@ const affectations: Affectation[] = [
   { id: 6, etudiant: 6, voiture: 2 },
 ];
 
-function getBaseUrl(req: express.Request): { frontend: string; backend: string } {
-  const origin = `${req.protocol}://${req.get("host")}`;
-  const frontend = process.env.PUBLIC_FRONTEND_URL || process.env.APP_URL || origin;
-  const backend = process.env.PUBLIC_BACKEND_URL || process.env.APP_URL || origin;
-  return { frontend: frontend.replace(/\/$/, ""), backend: backend.replace(/\/$/, "") };
+function validHttpUrl(value?: string): string {
+  if (!value) return "";
+  const trimmed = value.trim().replace(/\/$/, "");
+  return /^https?:\/\/.+/i.test(trimmed) ? trimmed : "";
 }
 
-function enrichEtudiant(e: Etudiant, backendUrl: string) {
+function getBaseUrl(req: express.Request): { frontend: string; backend: string; mediaBase: string } {
+  const host = req.get("host");
+  const origin = host ? `${req.protocol}://${host}` : "";
+  const vercelUrl = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "";
+  const frontend =
+    validHttpUrl(process.env.PUBLIC_FRONTEND_URL) ||
+    validHttpUrl(process.env.APP_URL) ||
+    origin ||
+    vercelUrl;
+  const explicitBackend = validHttpUrl(process.env.PUBLIC_BACKEND_URL);
+  const backend = explicitBackend || validHttpUrl(process.env.APP_URL) || origin || vercelUrl;
+  const mediaBase = explicitBackend || "";
+  return { frontend, backend, mediaBase };
+}
+
+function enrichEtudiant(e: Etudiant, mediaBase: string) {
   const aff = affectations.find((a) => a.etudiant === e.id);
   const voiture = aff ? voitures.find((v) => v.id === aff.voiture) || null : null;
   return {
     ...e,
-    photo_url: e.photo ? `${backendUrl}${e.photo}` : null,
+    photo_url: e.photo ? `${mediaBase}${e.photo}` : null,
     voiture_numero: voiture ? voiture.numero_voiture : null,
     voiture_id: voiture ? voiture.id : null,
   };
@@ -184,7 +223,7 @@ function requireAuth(req: express.Request, res: express.Response, next: express.
     return;
   }
   const token = header.slice(7);
-  if (!VALID_TOKENS.has(token)) {
+  if (!verifySignedToken(token)) {
     res.status(401).json({ detail: "Token invalide ou expiré." });
     return;
   }
@@ -196,19 +235,16 @@ export async function createApp() {
   app.set("trust proxy", true);
   app.use(express.json());
 
-  // ✅ VERCEL : On sert les médias depuis /tmp sur Vercel, depuis uploads/ en local
-  const MEDIA_ROOT = process.env.VERCEL
-    ? "/tmp/uploads"
-    : path.resolve(process.cwd(), "uploads");
+  // ✅ VERCEL & LOCAL : Montage explicite des photos puis du dossier médias
+  app.use("/media/etudiants/photos", express.static(UPLOAD_DIR));
   app.use("/media", express.static(MEDIA_ROOT));
 
   // ============ AUTH ============
   app.post("/api/auth/login/", (req, res) => {
     const { username, password } = req.body || {};
     if (username === ADMIN_USER.username && password === ADMIN_USER.password) {
-      const access = `eni_${crypto.randomBytes(24).toString("hex")}`;
-      const refresh = `eni_ref_${crypto.randomBytes(24).toString("hex")}`;
-      VALID_TOKENS.add(access);
+      const access = createSignedToken("access");
+      const refresh = createSignedToken("refresh");
       res.json({ access, refresh });
       return;
     }
@@ -216,8 +252,7 @@ export async function createApp() {
   });
 
   app.post("/api/auth/refresh/", (_req, res) => {
-    const access = `eni_${crypto.randomBytes(24).toString("hex")}`;
-    VALID_TOKENS.add(access);
+    const access = createSignedToken("access");
     res.json({ access });
   });
 
@@ -253,10 +288,10 @@ export async function createApp() {
 
   // ============ ETUDIANTS ============
   app.get("/api/etudiants/", (req, res) => {
-    const { backend } = getBaseUrl(req);
+    const { mediaBase } = getBaseUrl(req);
     const search = String(req.query.search || "").trim().toLowerCase();
     const parcours = String(req.query.parcours || "").trim().toUpperCase();
-    let list = etudiants.map((e) => enrichEtudiant(e, backend));
+    let list = etudiants.map((e) => enrichEtudiant(e, mediaBase));
     if (search) {
       list = list.filter(
         (e) =>
@@ -272,7 +307,7 @@ export async function createApp() {
   });
 
   app.post("/api/etudiants/", requireAuth, upload.single("photo"), (req, res) => {
-    const { backend } = getBaseUrl(req);
+    const { mediaBase } = getBaseUrl(req);
     const body = req.body || {};
     if (!body.matricule || !body.nom || !body.prenom || !body.parcours) {
       res.status(400).json({ detail: "Matricule, nom, prénom et parcours sont obligatoires." });
@@ -294,11 +329,11 @@ export async function createApp() {
       qr_token: crypto.randomUUID(),
     };
     etudiants.unshift(created);
-    res.status(201).json(enrichEtudiant(created, backend));
+    res.status(201).json(enrichEtudiant(created, mediaBase));
   });
 
   app.patch("/api/etudiants/:id/", requireAuth, upload.single("photo"), (req, res) => {
-    const { backend } = getBaseUrl(req);
+    const { mediaBase } = getBaseUrl(req);
     const id = Number(req.params.id);
     const idx = etudiants.findIndex((e) => e.id === id);
     if (idx === -1) {
@@ -316,7 +351,7 @@ export async function createApp() {
       telephone: body.telephone ?? etudiants[idx].telephone,
       photo: req.file ? `/media/etudiants/photos/${req.file.filename}` : etudiants[idx].photo,
     };
-    res.json(enrichEtudiant(etudiants[idx], backend));
+    res.json(enrichEtudiant(etudiants[idx], mediaBase));
   });
 
   app.delete("/api/etudiants/:id/", requireAuth, (req, res) => {
@@ -383,7 +418,7 @@ export async function createApp() {
 
   // ============ VOITURES ============
   app.get("/api/voitures/liste/", (req, res) => {
-    const { backend } = getBaseUrl(req);
+    const { mediaBase } = getBaseUrl(req);
     const enriched = [...voitures]
       .sort((a, b) => a.numero_voiture - b.numero_voiture)
       .map((v) => {
@@ -391,13 +426,13 @@ export async function createApp() {
         const chef = v.chef_voiture ? etudiants.find((e) => e.id === v.chef_voiture) || null : null;
         return {
           ...v,
-          chef_voiture_detail: chef ? enrichEtudiant(chef, backend) : null,
+          chef_voiture_detail: chef ? enrichEtudiant(chef, mediaBase) : null,
           places_occupees: affs.length,
           places_disponibles: Math.max(0, v.capacite - affs.length),
           etudiants: affs
             .map((a) => etudiants.find((e) => e.id === a.etudiant))
             .filter((e): e is Etudiant => Boolean(e))
-            .map((e) => enrichEtudiant(e, backend)),
+            .map((e) => enrichEtudiant(e, mediaBase)),
         };
       });
     res.json(enriched);
@@ -561,13 +596,13 @@ export async function createApp() {
 
   // ============ AFFECTATIONS ============
   app.get("/api/voitures/affectations/", (req, res) => {
-    const { backend } = getBaseUrl(req);
+    const { mediaBase } = getBaseUrl(req);
     const list = affectations.map((a) => {
       const etu = etudiants.find((e) => e.id === a.etudiant);
       const voi = voitures.find((v) => v.id === a.voiture);
       return {
         ...a,
-        etudiant_detail: etu ? enrichEtudiant(etu, backend) : null,
+        etudiant_detail: etu ? enrichEtudiant(etu, mediaBase) : null,
         voiture_detail: voi || null,
       };
     });
@@ -726,7 +761,7 @@ export async function createApp() {
         : question;
 
       const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash", // ✅ modèle stable
+        model: "gemini-2.5-flash",
         contents: prompt,
         config: { systemInstruction },
       });
@@ -740,7 +775,7 @@ export async function createApp() {
 
   // ============ BADGES ============
   app.get("/api/badges/:uuid/info/", (req, res) => {
-    const { frontend, backend } = getBaseUrl(req);
+    const { frontend, mediaBase } = getBaseUrl(req);
     const etu = etudiants.find((e) => e.qr_token === req.params.uuid);
     if (!etu) {
       res.status(404).json({ detail: "Badge introuvable." });
@@ -753,11 +788,11 @@ export async function createApp() {
     );
 
     res.json({
-      etudiant: enrichEtudiant(etu, backend),
+      etudiant: enrichEtudiant(etu, mediaBase),
       voiture,
       programme: sortedProgramme,
       parametres,
-      qr_url: `${backend}/api/badges/${etu.qr_token}/qr/`,
+      qr_url: `${mediaBase}/api/badges/${etu.qr_token}/qr/`,
       badge_public_url: `${frontend}/badge/${etu.qr_token}`,
     });
   });
@@ -856,7 +891,6 @@ export async function createApp() {
   });
 
   // ============ VITE / STATIC ============
-  // ✅ VERCEL : En production (déploiement), on sert le dossier dist/
   if (process.env.NODE_ENV !== "production" && !process.env.VERCEL) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -873,6 +907,3 @@ export async function createApp() {
 
   return app;
 }
-
-// ✅ VERCEL : On démarre seulement en local, on exporte sur Vercel
-export default createApp;
