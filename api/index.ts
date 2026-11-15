@@ -1,13 +1,12 @@
 import type { IncomingMessage, ServerResponse } from "http";
 import express from "express";
-import path from "path";
-import fs from "fs";
 import crypto from "crypto";
 import multer from "multer";
 import QRCode from "qrcode";
 import PDFDocument from "pdfkit";
 import dotenv from "dotenv";
 import { GoogleGenAI } from "@google/genai";
+import { getPool } from "./db.js";
 
 dotenv.config();
 
@@ -20,72 +19,11 @@ function getGeminiClient() {
     });
 }
 
-const MEDIA_ROOT = process.env.VERCEL
-    ? "/tmp/uploads"
-    : path.resolve(process.cwd(), "uploads");
-const UPLOAD_DIR = path.join(MEDIA_ROOT, "etudiants", "photos");
-fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-
-const storage = multer.diskStorage({
-    destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
-    filename: (_req, file, cb) => {
-        const ext = path.extname(file.originalname) || ".jpg";
-        cb(null, `${crypto.randomUUID()}${ext}`);
-    },
+// ✅ Mémoire uniquement : compatible Vercel et local, les photos vont dans PostgreSQL (BYTEA)
+const upload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 4 * 1024 * 1024 },
 });
-const upload = multer({ storage });
-
-interface ParametresVoyage {
-    id: number;
-    date_debut: string;
-    date_fin: string;
-    destination: string;
-    ecole: string;
-    annee_promotion: string;
-    nom_responsable: string;
-    tel_responsable: string;
-    nom_responsable_sante: string;
-    tel_responsable_sante: string;
-}
-
-interface Etudiant {
-    id: number;
-    matricule: string;
-    nom: string;
-    prenom: string;
-    parcours: "MDI" | "ASR" | "IG" | "IA";
-    email: string;
-    telephone: string;
-    photo: string | null;
-    qr_token: string;
-}
-
-interface ProgrammeItem {
-    id: number;
-    jour: number;
-    periode: "MATIN" | "MIDI";
-    heure_debut: string;
-    heure_fin: string | null;
-    activite: string;
-    lieu: string;
-}
-
-interface Voiture {
-    id: number;
-    numero_voiture: number;
-    capacite: number;
-    immatriculation: string;
-    chauffeur: string;
-    telephone_chauffeur: string;
-    chef_voiture: number | null;
-    validee: boolean;
-}
-
-interface Affectation {
-    id: number;
-    etudiant: number;
-    voiture: number;
-}
 
 const ADMIN_USER = {
     id: 1,
@@ -123,72 +61,17 @@ function verifySignedToken(token: string): boolean {
     return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
 }
 
-let parametres: ParametresVoyage = {
-    id: 1,
-    date_debut: "2026-06-15",
-    date_fin: "2026-06-21",
-    destination: "TOLIARA",
-    ecole: "ENI",
-    annee_promotion: "2025-2026",
-    nom_responsable: "Pr. Rakotomalala Jean",
-    tel_responsable: "+261 34 12 345 67",
-    nom_responsable_sante: "Dr. Rasoanirina Miora",
-    tel_responsable_sante: "+261 33 98 765 43",
-};
-
-let nextEtudiantId = 9;
-const etudiants: Etudiant[] = [
-    { id: 1, matricule: "2401-ENI", nom: "RANDRIANARIVO", prenom: "Lucas", parcours: "IG", email: "lucas.r@eni.mg", telephone: "034 11 223 34", photo: null, qr_token: "a1b2c3d4-1111-4000-8000-000000000001" },
-    { id: 2, matricule: "2402-ENI", nom: "RAKOTONDRABE", prenom: "Sarobidy", parcours: "IA", email: "sarobidy.r@eni.mg", telephone: "034 22 334 45", photo: null, qr_token: "a1b2c3d4-1111-4000-8000-000000000002" },
-    { id: 3, matricule: "2403-ENI", nom: "ANDRIAMANANA", prenom: "Tiana", parcours: "ASR", email: "tiana.a@eni.mg", telephone: "032 45 678 90", photo: null, qr_token: "a1b2c3d4-1111-4000-8000-000000000003" },
-    { id: 4, matricule: "2404-ENI", nom: "RAZAFINDRATSIMA", prenom: "Feno", parcours: "MDI", email: "feno.r@eni.mg", telephone: "033 55 112 23", photo: null, qr_token: "a1b2c3d4-1111-4000-8000-000000000004" },
-    { id: 5, matricule: "2405-ENI", nom: "RABEMANANJARA", prenom: "Koloina", parcours: "IA", email: "koloina.r@eni.mg", telephone: "034 88 990 11", photo: null, qr_token: "a1b2c3d4-1111-4000-8000-000000000005" },
-    { id: 6, matricule: "2406-ENI", nom: "RAMAROSON", prenom: "Hery", parcours: "IG", email: "hery.r@eni.mg", telephone: "034 77 665 44", photo: null, qr_token: "a1b2c3d4-1111-4000-8000-000000000006" },
-    { id: 7, matricule: "2407-ENI", nom: "RATSIMBAZAFY", prenom: "Nomena", parcours: "ASR", email: "nomena.r@eni.mg", telephone: "032 10 203 04", photo: null, qr_token: "a1b2c3d4-1111-4000-8000-000000000007" },
-    { id: 8, matricule: "2408-ENI", nom: "RASOLOFOMANANA", prenom: "Mialy", parcours: "MDI", email: "mialy.r@eni.mg", telephone: "033 44 556 67", photo: null, qr_token: "a1b2c3d4-1111-4000-8000-000000000008" },
-];
-
-let nextProgrammeId = 15;
-const programmes: ProgrammeItem[] = [
-    { id: 1, jour: 1, periode: "MATIN", heure_debut: "05:30", heure_fin: "12:00", activite: "Rassemblement ENI & Départ convoi RN7", lieu: "Campus Tanambao, Fianarantsoa" },
-    { id: 2, jour: 1, periode: "MIDI", heure_debut: "13:00", heure_fin: "19:30", activite: "Escale Ihosy & Arrivée à Toliara", lieu: "Hôtel Le Grand Bleu, Toliara" },
-    { id: 3, jour: 2, periode: "MATIN", heure_debut: "08:00", heure_fin: "12:00", activite: "Visite infrastructure télécom & datacenter régional", lieu: "Telma / Yas Hub Toliara" },
-    { id: 4, jour: 2, periode: "MIDI", heure_debut: "14:00", heure_fin: "17:00", activite: "Conférence Cloud & Cybersécurité avec l'Université", lieu: "Université de Toliara" },
-    { id: 5, jour: 3, periode: "MATIN", heure_debut: "08:30", heure_fin: "12:00", activite: "Immersion systèmes embarqués & énergie solaire", lieu: "Centrale Solaire Toliara" },
-    { id: 6, jour: 3, periode: "MIDI", heure_debut: "14:00", heure_fin: "17:30", activite: "Atelier IA appliquée à la biodiversité marine", lieu: "IHSM Toliara" },
-    { id: 7, jour: 4, periode: "MATIN", heure_debut: "08:00", heure_fin: "12:00", activite: "Audit SI & gestion logistique portuaire", lieu: "Port de Toliara" },
-    { id: 8, jour: 4, periode: "MIDI", heure_debut: "14:30", heure_fin: "18:00", activite: "Découverte culturelle & cohésion d'équipe", lieu: "Ifaty / Mangily" },
-    { id: 9, jour: 5, periode: "MATIN", heure_debut: "08:30", heure_fin: "12:00", activite: "Table ronde entreprises numériques du Sud", lieu: "Chambre de Commerce Toliara" },
-    { id: 10, jour: 5, periode: "MIDI", heure_debut: "14:00", heure_fin: "17:00", activite: "Hackathon inter-parcours MDI/ASR/IG/IA", lieu: "Salle Conférence Hôtel" },
-    { id: 11, jour: 6, periode: "MATIN", heure_debut: "09:00", heure_fin: "12:00", activite: "Restitution des travaux & remise attestations", lieu: "Université de Toliara" },
-    { id: 12, jour: 6, periode: "MIDI", heure_debut: "15:00", heure_fin: "18:30", activite: "Visite Arboretum d'Antsokay", lieu: "Antsokay" },
-    { id: 13, jour: 7, periode: "MATIN", heure_debut: "06:00", heure_fin: "12:30", activite: "Départ retour convoi Toliara → Fianarantsoa", lieu: "RN7" },
-    { id: 14, jour: 7, periode: "MIDI", heure_debut: "13:30", heure_fin: "20:00", activite: "Arrivée finale & clôture du voyage d'étude", lieu: "Campus ENI Fianarantsoa" },
-];
-
-let nextVoitureId = 3;
-const voitures: Voiture[] = [
-    { id: 1, numero_voiture: 1, capacite: 26, immatriculation: "4521 TAB", chauffeur: "Rabe Patrice", telephone_chauffeur: "034 12 001 01", chef_voiture: 1, validee: false },
-    { id: 2, numero_voiture: 2, capacite: 26, immatriculation: "7890 TBC", chauffeur: "Rakoto Solo", telephone_chauffeur: "034 12 002 02", chef_voiture: 4, validee: false },
-];
-
-let nextAffectationId = 7;
-const affectations: Affectation[] = [
-    { id: 1, etudiant: 1, voiture: 1 },
-    { id: 2, etudiant: 2, voiture: 1 },
-    { id: 3, etudiant: 3, voiture: 1 },
-    { id: 4, etudiant: 4, voiture: 2 },
-    { id: 5, etudiant: 5, voiture: 2 },
-    { id: 6, etudiant: 6, voiture: 2 },
-];
-
 function validHttpUrl(value?: string): string {
     if (!value) return "";
     const trimmed = value.trim().replace(/\/$/, "");
     return /^https?:\/\/.+/i.test(trimmed) ? trimmed : "";
 }
 
-function getBaseUrl(req: express.Request): { frontend: string; backend: string; mediaBase: string } {
+function getBaseUrl(req: express.Request): {
+    frontend: string;
+    backend: string;
+    mediaBase: string;
+} {
     const host = req.get("host");
     const origin = host ? `${req.protocol}://${host}` : "";
     const vercelUrl = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "";
@@ -203,18 +86,28 @@ function getBaseUrl(req: express.Request): { frontend: string; backend: string; 
     return { frontend, backend, mediaBase };
 }
 
-function enrichEtudiant(e: Etudiant, mediaBase: string) {
-    const aff = affectations.find((a) => a.etudiant === e.id);
-    const voiture = aff ? voitures.find((v) => v.id === aff.voiture) || null : null;
+function formatEtudiant(row: Record<string, any>, mediaBase: string) {
     return {
-        ...e,
-        photo_url: e.photo ? `${mediaBase}${e.photo}` : null,
-        voiture_numero: voiture ? voiture.numero_voiture : null,
-        voiture_id: voiture ? voiture.id : null,
+        id: row.id,
+        matricule: row.matricule,
+        nom: row.nom,
+        prenom: row.prenom,
+        parcours: row.parcours,
+        email: row.email,
+        telephone: row.telephone,
+        photo: row.photo || null,
+        photo_url: row.photo ? `${mediaBase}${row.photo}` : null,
+        qr_token: row.qr_token,
+        voiture_numero: row.voiture_numero ?? null,
+        voiture_id: row.voiture_id ?? null,
     };
 }
 
-function requireAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
+function requireAuth(
+    req: express.Request,
+    res: express.Response,
+    next: express.NextFunction
+) {
     const header = req.headers.authorization;
     if (!header || !header.startsWith("Bearer ")) {
         res.status(401).json({ detail: "Authentification requise." });
@@ -233,24 +126,21 @@ export async function createApp() {
     app.set("trust proxy", true);
     app.use(express.json());
 
-    app.use("/media/etudiants/photos", express.static(UPLOAD_DIR));
-    app.use("/media", express.static(MEDIA_ROOT));
-
     // ============ AUTH ============
     app.post("/api/auth/login/", (req, res) => {
         const { username, password } = req.body || {};
         if (username === ADMIN_USER.username && password === ADMIN_USER.password) {
-            const access = createSignedToken("access");
-            const refresh = createSignedToken("refresh");
-            res.json({ access, refresh });
+            res.json({
+                access: createSignedToken("access"),
+                refresh: createSignedToken("refresh"),
+            });
             return;
         }
         res.status(401).json({ detail: "Identifiants invalides." });
     });
 
     app.post("/api/auth/refresh/", (_req, res) => {
-        const access = createSignedToken("access");
-        res.json({ access });
+        res.json({ access: createSignedToken("access") });
     });
 
     app.get("/api/auth/me/", requireAuth, (_req, res) => {
@@ -264,396 +154,754 @@ export async function createApp() {
     });
 
     // ============ CORE PARAMETRES ============
-    app.get("/api/core/parametres/", (_req, res) => {
-        res.json([parametres]);
+    app.get("/api/core/parametres/", async (_req, res) => {
+        try {
+            const pool = getPool();
+            const { rows } = await pool.query(
+                "SELECT id, date_debut, date_fin, destination, ecole, annee_promotion, nom_responsable, tel_responsable, nom_responsable_sante, tel_responsable_sante FROM parametres_voyage WHERE id = 1"
+            );
+            res.json(rows);
+        } catch (err: any) {
+            res.status(500).json({ detail: err.message });
+        }
     });
 
-    app.post("/api/core/parametres/", requireAuth, (req, res) => {
-        parametres = { ...parametres, ...req.body, id: 1 };
-        res.status(201).json(parametres);
-    });
+    const updateParametres = async (req: express.Request, res: express.Response) => {
+        try {
+            const pool = getPool();
+            const b = req.body || {};
+            const { rows } = await pool.query(
+                `UPDATE parametres_voyage SET
+          date_debut = COALESCE($1, date_debut),
+          date_fin = COALESCE($2, date_fin),
+          destination = COALESCE($3, destination),
+          ecole = COALESCE($4, ecole),
+          annee_promotion = COALESCE($5, annee_promotion),
+          nom_responsable = COALESCE($6, nom_responsable),
+          tel_responsable = COALESCE($7, tel_responsable),
+          nom_responsable_sante = COALESCE($8, nom_responsable_sante),
+          tel_responsable_sante = COALESCE($9, tel_responsable_sante),
+          updated_at = NOW()
+        WHERE id = 1
+        RETURNING id, date_debut, date_fin, destination, ecole, annee_promotion, nom_responsable, tel_responsable, nom_responsable_sante, tel_responsable_sante`,
+                [
+                    b.date_debut ?? null,
+                    b.date_fin ?? null,
+                    b.destination ?? null,
+                    b.ecole ?? null,
+                    b.annee_promotion ?? null,
+                    b.nom_responsable ?? null,
+                    b.tel_responsable ?? null,
+                    b.nom_responsable_sante ?? null,
+                    b.tel_responsable_sante ?? null,
+                ]
+            );
+            res.json(rows[0]);
+        } catch (err: any) {
+            res.status(500).json({ detail: err.message });
+        }
+    };
 
-    app.put("/api/core/parametres/:id/", requireAuth, (req, res) => {
-        parametres = { ...parametres, ...req.body, id: 1 };
-        res.json(parametres);
-    });
-
-    app.patch("/api/core/parametres/:id/", requireAuth, (req, res) => {
-        parametres = { ...parametres, ...req.body, id: 1 };
-        res.json(parametres);
-    });
+    app.post("/api/core/parametres/", requireAuth, updateParametres);
+    app.put("/api/core/parametres/:id/", requireAuth, updateParametres);
+    app.patch("/api/core/parametres/:id/", requireAuth, updateParametres);
 
     // ============ ETUDIANTS ============
-    app.get("/api/etudiants/", (req, res) => {
-        const { mediaBase } = getBaseUrl(req);
-        const search = String(req.query.search || "").trim().toLowerCase();
-        const parcours = String(req.query.parcours || "").trim().toUpperCase();
-        let list = etudiants.map((e) => enrichEtudiant(e, mediaBase));
-        if (search) {
-            list = list.filter(
-                (e) =>
-                    e.nom.toLowerCase().includes(search) ||
-                    e.prenom.toLowerCase().includes(search) ||
-                    e.matricule.toLowerCase().includes(search)
+    app.get("/api/etudiants/", async (req, res) => {
+        try {
+            const pool = getPool();
+            const { mediaBase } = getBaseUrl(req);
+            const search = String(req.query.search || "").trim().toLowerCase();
+            const parcours = String(req.query.parcours || "").trim().toUpperCase();
+
+            const params: any[] = [];
+            const conditions: string[] = [];
+
+            if (search) {
+                params.push(`%${search}%`);
+                conditions.push(
+                    `(LOWER(e.nom) LIKE $${params.length} OR LOWER(e.prenom) LIKE $${params.length} OR LOWER(e.matricule) LIKE $${params.length})`
+                );
+            }
+            if (parcours) {
+                params.push(parcours);
+                conditions.push(`e.parcours = $${params.length}`);
+            }
+
+            const whereClause = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+            const { rows } = await pool.query(
+                `SELECT e.id, e.matricule, e.nom, e.prenom, e.parcours, e.email, e.telephone, e.photo, e.qr_token,
+                v.id AS voiture_id, v.numero_voiture
+         FROM etudiants e
+         LEFT JOIN affectations a ON a.etudiant = e.id
+         LEFT JOIN voitures v ON v.id = a.voiture
+         ${whereClause}
+         ORDER BY e.id DESC`,
+                params
             );
+
+            res.json(rows.map((r) => formatEtudiant(r, mediaBase)));
+        } catch (err: any) {
+            res.status(500).json({ detail: err.message });
         }
-        if (parcours) {
-            list = list.filter((e) => e.parcours === parcours);
-        }
-        res.json(list);
     });
 
-    app.post("/api/etudiants/", requireAuth, upload.single("photo"), (req, res) => {
-        const { mediaBase } = getBaseUrl(req);
-        const body = req.body || {};
-        if (!body.matricule || !body.nom || !body.prenom || !body.parcours) {
-            res.status(400).json({ detail: "Matricule, nom, prénom et parcours sont obligatoires." });
-            return;
+    app.get("/api/etudiants/:id/photo/", async (req, res) => {
+        try {
+            const pool = getPool();
+            const { rows } = await pool.query(
+                "SELECT photo_data, photo_mime FROM etudiants WHERE id = $1",
+                [Number(req.params.id)]
+            );
+            if (!rows[0] || !rows[0].photo_data) {
+                res.status(404).end();
+                return;
+            }
+            res.setHeader("Content-Type", rows[0].photo_mime || "image/jpeg");
+            res.setHeader("Cache-Control", "no-store");
+            res.send(rows[0].photo_data);
+        } catch {
+            res.status(500).end();
         }
-        if (etudiants.some((e) => e.matricule.toLowerCase() === String(body.matricule).toLowerCase())) {
-            res.status(400).json({ matricule: ["Ce matricule existe déjà."] });
-            return;
-        }
-        const created: Etudiant = {
-            id: nextEtudiantId++,
-            matricule: String(body.matricule).trim(),
-            nom: String(body.nom).trim().toUpperCase(),
-            prenom: String(body.prenom).trim(),
-            parcours: body.parcours,
-            email: body.email || "",
-            telephone: body.telephone || "",
-            photo: req.file ? `/media/etudiants/photos/${req.file.filename}` : null,
-            qr_token: crypto.randomUUID(),
-        };
-        etudiants.unshift(created);
-        res.status(201).json(enrichEtudiant(created, mediaBase));
     });
 
-    app.patch("/api/etudiants/:id/", requireAuth, upload.single("photo"), (req, res) => {
-        const { mediaBase } = getBaseUrl(req);
-        const id = Number(req.params.id);
-        const idx = etudiants.findIndex((e) => e.id === id);
-        if (idx === -1) {
-            res.status(404).json({ detail: "Étudiant introuvable." });
-            return;
+    app.post("/api/etudiants/", requireAuth, upload.single("photo"), async (req, res) => {
+        try {
+            const pool = getPool();
+            const { mediaBase } = getBaseUrl(req);
+            const body = req.body || {};
+
+            if (!body.matricule || !body.nom || !body.prenom || !body.parcours) {
+                res.status(400).json({ detail: "Matricule, nom, prénom et parcours sont obligatoires." });
+                return;
+            }
+
+            const existing = await pool.query(
+                "SELECT id FROM etudiants WHERE LOWER(matricule) = LOWER($1)",
+                [String(body.matricule).trim()]
+            );
+            if (existing.rows.length > 0) {
+                res.status(400).json({ matricule: ["Ce matricule existe déjà."] });
+                return;
+            }
+
+            const qrToken = crypto.randomUUID();
+            const { rows } = await pool.query(
+                `INSERT INTO etudiants (matricule, nom, prenom, parcours, email, telephone, photo_data, photo_mime, qr_token)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         RETURNING id, matricule, nom, prenom, parcours, email, telephone, photo, qr_token`,
+                [
+                    String(body.matricule).trim(),
+                    String(body.nom).trim().toUpperCase(),
+                    String(body.prenom).trim(),
+                    String(body.parcours).trim().toUpperCase(),
+                    body.email || "",
+                    body.telephone || "",
+                    req.file ? req.file.buffer : null,
+                    req.file ? req.file.mimetype : null,
+                    qrToken,
+                ]
+            );
+
+            let student = rows[0];
+            if (req.file) {
+                const photoPath = `/api/etudiants/${student.id}/photo/?v=${Date.now()}`;
+                const updated = await pool.query(
+                    "UPDATE etudiants SET photo = $1 WHERE id = $2 RETURNING id, matricule, nom, prenom, parcours, email, telephone, photo, qr_token",
+                    [photoPath, student.id]
+                );
+                student = updated.rows[0];
+            }
+
+            res.status(201).json(formatEtudiant(student, mediaBase));
+        } catch (err: any) {
+            res.status(500).json({ detail: err.message });
         }
-        const body = req.body || {};
-        etudiants[idx] = {
-            ...etudiants[idx],
-            matricule: body.matricule ?? etudiants[idx].matricule,
-            nom: body.nom ? String(body.nom).toUpperCase() : etudiants[idx].nom,
-            prenom: body.prenom ?? etudiants[idx].prenom,
-            parcours: body.parcours ?? etudiants[idx].parcours,
-            email: body.email ?? etudiants[idx].email,
-            telephone: body.telephone ?? etudiants[idx].telephone,
-            photo: req.file ? `/media/etudiants/photos/${req.file.filename}` : etudiants[idx].photo,
-        };
-        res.json(enrichEtudiant(etudiants[idx], mediaBase));
     });
 
-    app.delete("/api/etudiants/:id/", requireAuth, (req, res) => {
-        const id = Number(req.params.id);
-        const idx = etudiants.findIndex((e) => e.id === id);
-        if (idx === -1) {
-            res.status(404).json({ detail: "Étudiant introuvable." });
-            return;
+    app.patch("/api/etudiants/:id/", requireAuth, upload.single("photo"), async (req, res) => {
+        try {
+            const pool = getPool();
+            const { mediaBase } = getBaseUrl(req);
+            const id = Number(req.params.id);
+            const body = req.body || {};
+
+            const current = await pool.query("SELECT id FROM etudiants WHERE id = $1", [id]);
+            if (current.rows.length === 0) {
+                res.status(404).json({ detail: "Étudiant introuvable." });
+                return;
+            }
+
+            const photoPath = req.file ? `/api/etudiants/${id}/photo/?v=${Date.now()}` : null;
+            await pool.query(
+                `UPDATE etudiants SET
+          matricule = COALESCE($1, matricule),
+          nom = COALESCE($2, nom),
+          prenom = COALESCE($3, prenom),
+          parcours = COALESCE($4, parcours),
+          email = COALESCE($5, email),
+          telephone = COALESCE($6, telephone),
+          photo = COALESCE($7, photo),
+          photo_data = COALESCE($8, photo_data),
+          photo_mime = COALESCE($9, photo_mime)
+        WHERE id = $10`,
+                [
+                    body.matricule !== undefined ? String(body.matricule).trim() : null,
+                    body.nom !== undefined ? String(body.nom).trim().toUpperCase() : null,
+                    body.prenom !== undefined ? String(body.prenom).trim() : null,
+                    body.parcours !== undefined ? String(body.parcours).trim().toUpperCase() : null,
+                    body.email !== undefined ? String(body.email) : null,
+                    body.telephone !== undefined ? String(body.telephone) : null,
+                    photoPath,
+                    req.file ? req.file.buffer : null,
+                    req.file ? req.file.mimetype : null,
+                    id,
+                ]
+            );
+
+            const { rows } = await pool.query(
+                `SELECT e.id, e.matricule, e.nom, e.prenom, e.parcours, e.email, e.telephone, e.photo, e.qr_token,
+                v.id AS voiture_id, v.numero_voiture
+         FROM etudiants e
+         LEFT JOIN affectations a ON a.etudiant = e.id
+         LEFT JOIN voitures v ON v.id = a.voiture
+         WHERE e.id = $1`,
+                [id]
+            );
+            res.json(formatEtudiant(rows[0], mediaBase));
+        } catch (err: any) {
+            res.status(500).json({ detail: err.message });
         }
-        etudiants.splice(idx, 1);
-        for (let i = affectations.length - 1; i >= 0; i--) {
-            if (affectations[i].etudiant === id) affectations.splice(i, 1);
+    });
+
+    app.delete("/api/etudiants/:id/", requireAuth, async (req, res) => {
+        try {
+            const pool = getPool();
+            const id = Number(req.params.id);
+            const result = await pool.query("DELETE FROM etudiants WHERE id = $1", [id]);
+            if (result.rowCount === 0) {
+                res.status(404).json({ detail: "Étudiant introuvable." });
+                return;
+            }
+            res.status(204).end();
+        } catch (err: any) {
+            res.status(500).json({ detail: err.message });
         }
-        res.status(204).end();
     });
 
     // ============ PROGRAMME ============
-    app.get("/api/programme/", (_req, res) => {
-        const sorted = [...programmes].sort((a, b) => a.jour - b.jour || a.heure_debut.localeCompare(b.heure_debut));
-        res.json(sorted);
+    app.get("/api/programme/", async (_req, res) => {
+        try {
+            const pool = getPool();
+            const { rows } = await pool.query(
+                "SELECT id, jour, periode, heure_debut, heure_fin, activite, lieu FROM programme_items ORDER BY jour ASC, heure_debut ASC"
+            );
+            res.json(rows);
+        } catch (err: any) {
+            res.status(500).json({ detail: err.message });
+        }
     });
 
-    app.post("/api/programme/", requireAuth, (req, res) => {
-        const body = req.body || {};
-        const jour = Number(body.jour);
-        if (jour < 1 || jour > 7) {
-            res.status(400).json({ jour: ["Le jour doit être compris entre 1 et 7."] });
-            return;
+    app.post("/api/programme/", requireAuth, async (req, res) => {
+        try {
+            const pool = getPool();
+            const body = req.body || {};
+            const jour = Number(body.jour);
+            if (jour < 1 || jour > 7) {
+                res.status(400).json({ jour: ["Le jour doit être compris entre 1 et 7."] });
+                return;
+            }
+            const { rows } = await pool.query(
+                `INSERT INTO programme_items (jour, periode, heure_debut, heure_fin, activite, lieu)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING id, jour, periode, heure_debut, heure_fin, activite, lieu`,
+                [
+                    jour,
+                    body.periode || "MATIN",
+                    body.heure_debut || "08:00",
+                    body.heure_fin || null,
+                    body.activite || "",
+                    body.lieu || "",
+                ]
+            );
+            res.status(201).json(rows[0]);
+        } catch (err: any) {
+            res.status(500).json({ detail: err.message });
         }
-        const created: ProgrammeItem = {
-            id: nextProgrammeId++,
-            jour,
-            periode: body.periode || "MATIN",
-            heure_debut: body.heure_debut || "08:00",
-            heure_fin: body.heure_fin || null,
-            activite: body.activite || "",
-            lieu: body.lieu || "",
-        };
-        programmes.push(created);
-        res.status(201).json(created);
     });
 
-    app.patch("/api/programme/:id/", requireAuth, (req, res) => {
-        const id = Number(req.params.id);
-        const idx = programmes.findIndex((p) => p.id === id);
-        if (idx === -1) {
-            res.status(404).json({ detail: "Activité introuvable." });
-            return;
+    app.patch("/api/programme/:id/", requireAuth, async (req, res) => {
+        try {
+            const pool = getPool();
+            const id = Number(req.params.id);
+            const b = req.body || {};
+            const { rows } = await pool.query(
+                `UPDATE programme_items SET
+          jour = COALESCE($1, jour),
+          periode = COALESCE($2, periode),
+          heure_debut = COALESCE($3, heure_debut),
+          heure_fin = COALESCE($4, heure_fin),
+          activite = COALESCE($5, activite),
+          lieu = COALESCE($6, lieu)
+         WHERE id = $7
+         RETURNING id, jour, periode, heure_debut, heure_fin, activite, lieu`,
+                [
+                    b.jour !== undefined ? Number(b.jour) : null,
+                    b.periode ?? null,
+                    b.heure_debut ?? null,
+                    b.heure_fin !== undefined ? b.heure_fin || null : null,
+                    b.activite ?? null,
+                    b.lieu ?? null,
+                    id,
+                ]
+            );
+            if (!rows[0]) {
+                res.status(404).json({ detail: "Activité introuvable." });
+                return;
+            }
+            res.json(rows[0]);
+        } catch (err: any) {
+            res.status(500).json({ detail: err.message });
         }
-        programmes[idx] = { ...programmes[idx], ...req.body, jour: Number(req.body.jour ?? programmes[idx].jour) };
-        res.json(programmes[idx]);
     });
 
-    app.delete("/api/programme/:id/", requireAuth, (req, res) => {
-        const id = Number(req.params.id);
-        const idx = programmes.findIndex((p) => p.id === id);
-        if (idx === -1) {
-            res.status(404).json({ detail: "Activité introuvable." });
-            return;
+    app.delete("/api/programme/:id/", requireAuth, async (req, res) => {
+        try {
+            const pool = getPool();
+            const result = await pool.query("DELETE FROM programme_items WHERE id = $1", [
+                Number(req.params.id),
+            ]);
+            if (result.rowCount === 0) {
+                res.status(404).json({ detail: "Activité introuvable." });
+                return;
+            }
+            res.status(204).end();
+        } catch (err: any) {
+            res.status(500).json({ detail: err.message });
         }
-        programmes.splice(idx, 1);
-        res.status(204).end();
     });
 
     // ============ VOITURES ============
-    app.get("/api/voitures/liste/", (req, res) => {
-        const { mediaBase } = getBaseUrl(req);
-        const enriched = [...voitures]
-            .sort((a, b) => a.numero_voiture - b.numero_voiture)
-            .map((v) => {
-                const affs = affectations.filter((a) => a.voiture === v.id);
-                const chef = v.chef_voiture ? etudiants.find((e) => e.id === v.chef_voiture) || null : null;
+    app.get("/api/voitures/liste/", async (req, res) => {
+        try {
+            const pool = getPool();
+            const { mediaBase } = getBaseUrl(req);
+            const [vRes, eRes, aRes] = await Promise.all([
+                pool.query("SELECT * FROM voitures ORDER BY numero_voiture ASC"),
+                pool.query(
+                    `SELECT e.id, e.matricule, e.nom, e.prenom, e.parcours, e.email, e.telephone, e.photo, e.qr_token,
+                  v.id AS voiture_id, v.numero_voiture
+           FROM etudiants e
+           LEFT JOIN affectations a ON a.etudiant = e.id
+           LEFT JOIN voitures v ON v.id = a.voiture`
+                ),
+                pool.query("SELECT id, etudiant, voiture FROM affectations ORDER BY id ASC"),
+            ]);
+
+            const etuMap = new Map(eRes.rows.map((e) => [e.id, formatEtudiant(e, mediaBase)]));
+            const enriched = vRes.rows.map((v) => {
+                const affs = aRes.rows.filter((a) => a.voiture === v.id);
+                const chef = v.chef_voiture ? etuMap.get(v.chef_voiture) || null : null;
+                const passagers = affs
+                    .map((a) => etuMap.get(a.etudiant))
+                    .filter((e): e is ReturnType<typeof formatEtudiant> => Boolean(e));
                 return {
                     ...v,
-                    chef_voiture_detail: chef ? enrichEtudiant(chef, mediaBase) : null,
-                    places_occupees: affs.length,
-                    places_disponibles: Math.max(0, v.capacite - affs.length),
-                    etudiants: affs
-                        .map((a) => etudiants.find((e) => e.id === a.etudiant))
-                        .filter((e): e is Etudiant => Boolean(e))
-                        .map((e) => enrichEtudiant(e, mediaBase)),
+                    chef_voiture_detail: chef,
+                    places_occupees: passagers.length,
+                    places_disponibles: Math.max(0, v.capacite - passagers.length),
+                    etudiants: passagers,
                 };
             });
-        res.json(enriched);
+            res.json(enriched);
+        } catch (err: any) {
+            res.status(500).json({ detail: err.message });
+        }
     });
 
-    app.post("/api/voitures/liste/", requireAuth, (req, res) => {
-        const body = req.body || {};
-        const num = Number(body.numero_voiture);
-        if (voitures.some((v) => v.numero_voiture === num)) {
-            res.status(400).json({ numero_voiture: ["Ce numéro de voiture existe déjà."] });
-            return;
-        }
-        const created: Voiture = {
-            id: nextVoitureId++,
-            numero_voiture: num,
-            capacite: Number(body.capacite || 26),
-            immatriculation: body.immatriculation || "",
-            chauffeur: body.chauffeur || "",
-            telephone_chauffeur: body.telephone_chauffeur || "",
-            chef_voiture: body.chef_voiture ? Number(body.chef_voiture) : null,
-            validee: false,
-        };
-        voitures.push(created);
-        res.status(201).json({ ...created, chef_voiture_detail: null, places_occupees: 0, places_disponibles: created.capacite, etudiants: [] });
-    });
-
-    app.patch("/api/voitures/liste/:id/", requireAuth, (req, res) => {
-        const id = Number(req.params.id);
-        const idx = voitures.findIndex((v) => v.id === id);
-        if (idx === -1) {
-            res.status(404).json({ detail: "Voiture introuvable." });
-            return;
-        }
-        voitures[idx] = {
-            ...voitures[idx],
-            ...req.body,
-            numero_voiture: Number(req.body.numero_voiture ?? voitures[idx].numero_voiture),
-            capacite: Number(req.body.capacite ?? voitures[idx].capacite),
-        };
-        res.json(voitures[idx]);
-    });
-
-    app.delete("/api/voitures/liste/:id/", requireAuth, (req, res) => {
-        const id = Number(req.params.id);
-        const idx = voitures.findIndex((v) => v.id === id);
-        if (idx === -1) {
-            res.status(404).json({ detail: "Voiture introuvable." });
-            return;
-        }
-        voitures.splice(idx, 1);
-        for (let i = affectations.length - 1; i >= 0; i--) {
-            if (affectations[i].voiture === id) affectations.splice(i, 1);
-        }
-        res.status(204).end();
-    });
-
-    app.post("/api/voitures/liste/:id/designer_chef/", requireAuth, (req, res) => {
-        const id = Number(req.params.id);
-        const etudiantId = Number(req.body.etudiant);
-        const voiture = voitures.find((v) => v.id === id);
-        if (!voiture) {
-            res.status(404).json({ detail: "Voiture introuvable." });
-            return;
-        }
-        const existingAff = affectations.find((a) => a.etudiant === etudiantId);
-        if (existingAff && existingAff.voiture !== id) {
-            res.status(400).json({ detail: "Cet étudiant est déjà affecté à une autre voiture." });
-            return;
-        }
-        if (!existingAff) {
-            const occ = affectations.filter((a) => a.voiture === id).length;
-            if (occ >= voiture.capacite) {
-                res.status(400).json({ detail: `La voiture N°${voiture.numero_voiture} est pleine.` });
+    app.post("/api/voitures/liste/", requireAuth, async (req, res) => {
+        try {
+            const pool = getPool();
+            const body = req.body || {};
+            const num = Number(body.numero_voiture);
+            const exists = await pool.query("SELECT id FROM voitures WHERE numero_voiture = $1", [num]);
+            if (exists.rows.length > 0) {
+                res.status(400).json({ numero_voiture: ["Ce numéro de voiture existe déjà."] });
                 return;
             }
-            affectations.push({ id: nextAffectationId++, etudiant: etudiantId, voiture: id });
-        }
-        voiture.chef_voiture = etudiantId;
-        res.json({ detail: "Chef de voiture désigné.", chef_voiture: etudiantId });
-    });
-
-    app.post("/api/voitures/liste/:id/valider/", requireAuth, (req, res) => {
-        const id = Number(req.params.id);
-        const voiture = voitures.find((v) => v.id === id);
-        if (!voiture) {
-            res.status(404).json({ detail: "Voiture introuvable." });
-            return;
-        }
-        const validee = req.body?.validee !== undefined ? Boolean(req.body.validee) : true;
-        const carAffs = affectations.filter((a) => a.voiture === id);
-        if (validee && carAffs.length === 0) {
-            res.status(400).json({ detail: "Impossible de valider une voiture vide." });
-            return;
-        }
-        if (req.body?.chef_voiture) {
-            voiture.chef_voiture = Number(req.body.chef_voiture);
-        } else if (validee && !voiture.chef_voiture && carAffs.length > 0) {
-            voiture.chef_voiture = carAffs[0].etudiant;
-        }
-        voiture.validee = validee;
-        res.json({
-            detail: validee ? `Voiture N°${voiture.numero_voiture} validée.` : `Voiture N°${voiture.numero_voiture} rouverte.`,
-            validee: voiture.validee,
-            chef_voiture: voiture.chef_voiture,
-        });
-    });
-
-    app.post("/api/voitures/liste/:id/embarquer/", (req, res) => {
-        const id = Number(req.params.id);
-        const etudiantId = Number(req.body.etudiant);
-        const voiture = voitures.find((v) => v.id === id);
-        if (!voiture) {
-            res.status(404).json({ detail: "Voiture introuvable." });
-            return;
-        }
-        if (voiture.validee) {
-            res.status(400).json({ detail: "Cette voiture est déjà validée par l'administration." });
-            return;
-        }
-        if (affectations.some((a) => a.etudiant === etudiantId)) {
-            res.status(400).json({ detail: "Cet étudiant est déjà affecté à une voiture." });
-            return;
-        }
-        const occ = affectations.filter((a) => a.voiture === id).length;
-        if (occ >= voiture.capacite) {
-            res.status(400).json({ detail: `La voiture N°${voiture.numero_voiture} est complète.` });
-            return;
-        }
-        const created = { id: nextAffectationId++, etudiant: etudiantId, voiture: id };
-        affectations.push(created);
-        if (!voiture.chef_voiture) {
-            voiture.chef_voiture = etudiantId;
-        }
-        res.status(201).json(created);
-    });
-
-    app.post("/api/voitures/liste/auto_affecter/", requireAuth, (_req, res) => {
-        const assignedIds = new Set(affectations.map((a) => a.etudiant));
-        const unassigned = etudiants.filter((e) => !assignedIds.has(e.id));
-        const sortedVoitures = [...voitures].sort((a, b) => a.numero_voiture - b.numero_voiture);
-        let count = 0;
-
-        for (const etu of unassigned) {
-            const target = sortedVoitures.find((v) => {
-                if (v.validee) return false;
-                const occ = affectations.filter((a) => a.voiture === v.id).length;
-                return occ < v.capacite;
+            const { rows } = await pool.query(
+                `INSERT INTO voitures (numero_voiture, capacite, immatriculation, chauffeur, telephone_chauffeur, chef_voiture, validee)
+         VALUES ($1, $2, $3, $4, $5, $6, FALSE)
+         RETURNING *`,
+                [
+                    num,
+                    Number(body.capacite || 26),
+                    body.immatriculation || "",
+                    body.chauffeur || "",
+                    body.telephone_chauffeur || "",
+                    body.chef_voiture ? Number(body.chef_voiture) : null,
+                ]
+            );
+            res.status(201).json({
+                ...rows[0],
+                chef_voiture_detail: null,
+                places_occupees: 0,
+                places_disponibles: rows[0].capacite,
+                etudiants: [],
             });
-            if (!target) break;
-            affectations.push({ id: nextAffectationId++, etudiant: etu.id, voiture: target.id });
-            if (!target.chef_voiture) target.chef_voiture = etu.id;
-            count++;
+        } catch (err: any) {
+            res.status(500).json({ detail: err.message });
         }
+    });
 
-        res.json({
-            affectes: count,
-            restants: unassigned.length - count,
-            message: `${count} étudiant(s) affecté(s) automatiquement.`,
-        });
+    app.patch("/api/voitures/liste/:id/", requireAuth, async (req, res) => {
+        try {
+            const pool = getPool();
+            const id = Number(req.params.id);
+            const b = req.body || {};
+            const { rows } = await pool.query(
+                `UPDATE voitures SET
+          numero_voiture = COALESCE($1, numero_voiture),
+          capacite = COALESCE($2, capacite),
+          immatriculation = COALESCE($3, immatriculation),
+          chauffeur = COALESCE($4, chauffeur),
+          telephone_chauffeur = COALESCE($5, telephone_chauffeur),
+          chef_voiture = COALESCE($6, chef_voiture),
+          validee = COALESCE($7, validee)
+         WHERE id = $8
+         RETURNING *`,
+                [
+                    b.numero_voiture !== undefined ? Number(b.numero_voiture) : null,
+                    b.capacite !== undefined ? Number(b.capacite) : null,
+                    b.immatriculation ?? null,
+                    b.chauffeur ?? null,
+                    b.telephone_chauffeur ?? null,
+                    b.chef_voiture !== undefined ? (b.chef_voiture ? Number(b.chef_voiture) : null) : null,
+                    b.validee !== undefined ? Boolean(b.validee) : null,
+                    id,
+                ]
+            );
+            if (!rows[0]) {
+                res.status(404).json({ detail: "Voiture introuvable." });
+                return;
+            }
+            res.json(rows[0]);
+        } catch (err: any) {
+            res.status(500).json({ detail: err.message });
+        }
+    });
+
+    app.delete("/api/voitures/liste/:id/", requireAuth, async (req, res) => {
+        try {
+            const pool = getPool();
+            const result = await pool.query("DELETE FROM voitures WHERE id = $1", [
+                Number(req.params.id),
+            ]);
+            if (result.rowCount === 0) {
+                res.status(404).json({ detail: "Voiture introuvable." });
+                return;
+            }
+            res.status(204).end();
+        } catch (err: any) {
+            res.status(500).json({ detail: err.message });
+        }
+    });
+
+    app.post("/api/voitures/liste/:id/designer_chef/", requireAuth, async (req, res) => {
+        try {
+            const pool = getPool();
+            const id = Number(req.params.id);
+            const etudiantId = Number(req.body.etudiant);
+            const vRes = await pool.query("SELECT * FROM voitures WHERE id = $1", [id]);
+            const voiture = vRes.rows[0];
+            if (!voiture) {
+                res.status(404).json({ detail: "Voiture introuvable." });
+                return;
+            }
+
+            const affRes = await pool.query("SELECT * FROM affectations WHERE etudiant = $1", [etudiantId]);
+            const existingAff = affRes.rows[0];
+            if (existingAff && existingAff.voiture !== id) {
+                res.status(400).json({ detail: "Cet étudiant est déjà affecté à une autre voiture." });
+                return;
+            }
+            if (!existingAff) {
+                const occRes = await pool.query(
+                    "SELECT COUNT(*)::int AS cnt FROM affectations WHERE voiture = $1",
+                    [id]
+                );
+                if (occRes.rows[0].cnt >= voiture.capacite) {
+                    res.status(400).json({ detail: `La voiture N°${voiture.numero_voiture} est pleine.` });
+                    return;
+                }
+                await pool.query("INSERT INTO affectations (etudiant, voiture) VALUES ($1, $2)", [
+                    etudiantId,
+                    id,
+                ]);
+            }
+
+            await pool.query("UPDATE voitures SET chef_voiture = $1 WHERE id = $2", [etudiantId, id]);
+            res.json({ detail: "Chef de voiture désigné.", chef_voiture: etudiantId });
+        } catch (err: any) {
+            res.status(500).json({ detail: err.message });
+        }
+    });
+
+    app.post("/api/voitures/liste/:id/valider/", requireAuth, async (req, res) => {
+        try {
+            const pool = getPool();
+            const id = Number(req.params.id);
+            const vRes = await pool.query("SELECT * FROM voitures WHERE id = $1", [id]);
+            const voiture = vRes.rows[0];
+            if (!voiture) {
+                res.status(404).json({ detail: "Voiture introuvable." });
+                return;
+            }
+
+            const validee = req.body?.validee !== undefined ? Boolean(req.body.validee) : true;
+            const affsRes = await pool.query(
+                "SELECT etudiant FROM affectations WHERE voiture = $1 ORDER BY id ASC",
+                [id]
+            );
+            if (validee && affsRes.rows.length === 0) {
+                res.status(400).json({ detail: "Impossible de valider une voiture vide." });
+                return;
+            }
+
+            let chefId = voiture.chef_voiture;
+            if (req.body?.chef_voiture) {
+                chefId = Number(req.body.chef_voiture);
+            } else if (validee && !chefId && affsRes.rows.length > 0) {
+                chefId = affsRes.rows[0].etudiant;
+            }
+
+            await pool.query("UPDATE voitures SET validee = $1, chef_voiture = $2 WHERE id = $3", [
+                validee,
+                chefId,
+                id,
+            ]);
+            res.json({
+                detail: validee
+                    ? `Voiture N°${voiture.numero_voiture} validée.`
+                    : `Voiture N°${voiture.numero_voiture} rouverte.`,
+                validee,
+                chef_voiture: chefId,
+            });
+        } catch (err: any) {
+            res.status(500).json({ detail: err.message });
+        }
+    });
+
+    app.post("/api/voitures/liste/:id/embarquer/", async (req, res) => {
+        try {
+            const pool = getPool();
+            const id = Number(req.params.id);
+            const etudiantId = Number(req.body.etudiant);
+            const vRes = await pool.query("SELECT * FROM voitures WHERE id = $1", [id]);
+            const voiture = vRes.rows[0];
+            if (!voiture) {
+                res.status(404).json({ detail: "Voiture introuvable." });
+                return;
+            }
+            if (voiture.validee) {
+                res.status(400).json({ detail: "Cette voiture est déjà validée par l'administration." });
+                return;
+            }
+            const already = await pool.query("SELECT id FROM affectations WHERE etudiant = $1", [
+                etudiantId,
+            ]);
+            if (already.rows.length > 0) {
+                res.status(400).json({ detail: "Cet étudiant est déjà affecté à une voiture." });
+                return;
+            }
+            const occRes = await pool.query(
+                "SELECT COUNT(*)::int AS cnt FROM affectations WHERE voiture = $1",
+                [id]
+            );
+            if (occRes.rows[0].cnt >= voiture.capacite) {
+                res.status(400).json({ detail: `La voiture N°${voiture.numero_voiture} est complète.` });
+                return;
+            }
+
+            const { rows } = await pool.query(
+                "INSERT INTO affectations (etudiant, voiture) VALUES ($1, $2) RETURNING id, etudiant, voiture",
+                [etudiantId, id]
+            );
+            if (!voiture.chef_voiture) {
+                await pool.query("UPDATE voitures SET chef_voiture = $1 WHERE id = $2", [etudiantId, id]);
+            }
+            res.status(201).json(rows[0]);
+        } catch (err: any) {
+            res.status(500).json({ detail: err.message });
+        }
+    });
+
+    app.post("/api/voitures/liste/auto_affecter/", requireAuth, async (_req, res) => {
+        const pool = getPool();
+        const client = await pool.connect();
+        try {
+            await client.query("BEGIN");
+            const unassignedRes = await client.query(
+                "SELECT id FROM etudiants WHERE id NOT IN (SELECT etudiant FROM affectations) ORDER BY id ASC"
+            );
+            const voituresRes = await client.query(
+                `SELECT v.id, v.capacite, v.validee, v.chef_voiture, COUNT(a.id)::int AS occ
+         FROM voitures v
+         LEFT JOIN affectations a ON a.voiture = v.id
+         GROUP BY v.id
+         ORDER BY v.numero_voiture ASC`
+            );
+
+            let count = 0;
+            const cars = voituresRes.rows;
+            for (const etu of unassignedRes.rows) {
+                const target = cars.find((v) => !v.validee && v.occ < v.capacite);
+                if (!target) break;
+                await client.query("INSERT INTO affectations (etudiant, voiture) VALUES ($1, $2)", [
+                    etu.id,
+                    target.id,
+                ]);
+                target.occ++;
+                if (!target.chef_voiture) {
+                    target.chef_voiture = etu.id;
+                    await client.query("UPDATE voitures SET chef_voiture = $1 WHERE id = $2", [
+                        etu.id,
+                        target.id,
+                    ]);
+                }
+                count++;
+            }
+
+            await client.query("COMMIT");
+            res.json({
+                affectes: count,
+                restants: unassignedRes.rows.length - count,
+                message: `${count} étudiant(s) affecté(s) automatiquement.`,
+            });
+        } catch (err: any) {
+            await client.query("ROLLBACK");
+            res.status(500).json({ detail: err.message });
+        } finally {
+            client.release();
+        }
     });
 
     // ============ AFFECTATIONS ============
-    app.get("/api/voitures/affectations/", (req, res) => {
-        const { mediaBase } = getBaseUrl(req);
-        const list = affectations.map((a) => {
-            const etu = etudiants.find((e) => e.id === a.etudiant);
-            const voi = voitures.find((v) => v.id === a.voiture);
-            return {
-                ...a,
-                etudiant_detail: etu ? enrichEtudiant(etu, mediaBase) : null,
-                voiture_detail: voi || null,
-            };
-        });
-        res.json(list);
+    app.get("/api/voitures/affectations/", async (req, res) => {
+        try {
+            const pool = getPool();
+            const { mediaBase } = getBaseUrl(req);
+            const [aRes, eRes, vRes] = await Promise.all([
+                pool.query("SELECT id, etudiant, voiture FROM affectations ORDER BY id DESC"),
+                pool.query(
+                    `SELECT e.id, e.matricule, e.nom, e.prenom, e.parcours, e.email, e.telephone, e.photo, e.qr_token,
+                  v.id AS voiture_id, v.numero_voiture
+           FROM etudiants e
+           LEFT JOIN affectations a ON a.etudiant = e.id
+           LEFT JOIN voitures v ON v.id = a.voiture`
+                ),
+                pool.query("SELECT * FROM voitures"),
+            ]);
+
+            const etuMap = new Map(eRes.rows.map((e) => [e.id, formatEtudiant(e, mediaBase)]));
+            const voiMap = new Map(vRes.rows.map((v) => [v.id, v]));
+
+            res.json(
+                aRes.rows.map((a) => ({
+                    id: a.id,
+                    etudiant: a.etudiant,
+                    voiture: a.voiture,
+                    etudiant_detail: etuMap.get(a.etudiant) || null,
+                    voiture_detail: voiMap.get(a.voiture) || null,
+                }))
+            );
+        } catch (err: any) {
+            res.status(500).json({ detail: err.message });
+        }
     });
 
-    app.post("/api/voitures/affectations/", (req, res) => {
-        const etudiantId = Number(req.body.etudiant);
-        const voitureId = Number(req.body.voiture);
-        const voiture = voitures.find((v) => v.id === voitureId);
-        if (!voiture) {
-            res.status(404).json({ detail: "Voiture introuvable." });
-            return;
+    app.post("/api/voitures/affectations/", async (req, res) => {
+        try {
+            const pool = getPool();
+            const etudiantId = Number(req.body.etudiant);
+            const voitureId = Number(req.body.voiture);
+
+            const vRes = await pool.query("SELECT * FROM voitures WHERE id = $1", [voitureId]);
+            const voiture = vRes.rows[0];
+            if (!voiture) {
+                res.status(404).json({ detail: "Voiture introuvable." });
+                return;
+            }
+            if (voiture.validee) {
+                res.status(400).json({ detail: `La voiture N°${voiture.numero_voiture} est déjà validée.` });
+                return;
+            }
+            const already = await pool.query("SELECT id FROM affectations WHERE etudiant = $1", [
+                etudiantId,
+            ]);
+            if (already.rows.length > 0) {
+                res.status(400).json({ detail: "Cet étudiant est déjà affecté à une voiture." });
+                return;
+            }
+            const occRes = await pool.query(
+                "SELECT COUNT(*)::int AS cnt FROM affectations WHERE voiture = $1",
+                [voitureId]
+            );
+            if (occRes.rows[0].cnt >= voiture.capacite) {
+                res.status(400).json({ detail: `La voiture N°${voiture.numero_voiture} est pleine.` });
+                return;
+            }
+
+            const { rows } = await pool.query(
+                "INSERT INTO affectations (etudiant, voiture) VALUES ($1, $2) RETURNING id, etudiant, voiture",
+                [etudiantId, voitureId]
+            );
+            if (!voiture.chef_voiture) {
+                await pool.query("UPDATE voitures SET chef_voiture = $1 WHERE id = $2", [
+                    etudiantId,
+                    voitureId,
+                ]);
+            }
+            res.status(201).json(rows[0]);
+        } catch (err: any) {
+            res.status(500).json({ detail: err.message });
         }
-        if (voiture.validee) {
-            res.status(400).json({ detail: `La voiture N°${voiture.numero_voiture} est déjà validée.` });
-            return;
-        }
-        if (affectations.some((a) => a.etudiant === etudiantId)) {
-            res.status(400).json({ detail: "Cet étudiant est déjà affecté à une voiture." });
-            return;
-        }
-        const occ = affectations.filter((a) => a.voiture === voitureId).length;
-        if (occ >= voiture.capacite) {
-            res.status(400).json({ detail: `La voiture N°${voiture.numero_voiture} est pleine.` });
-            return;
-        }
-        const created = { id: nextAffectationId++, etudiant: etudiantId, voiture: voitureId };
-        affectations.push(created);
-        if (!voiture.chef_voiture) {
-            voiture.chef_voiture = etudiantId;
-        }
-        res.status(201).json(created);
     });
 
-    app.delete("/api/voitures/affectations/:id/", (req, res) => {
-        const id = Number(req.params.id);
-        const idx = affectations.findIndex((a) => a.id === id);
-        if (idx === -1) {
-            res.status(404).json({ detail: "Affectation introuvable." });
-            return;
+    app.delete("/api/voitures/affectations/:id/", async (req, res) => {
+        try {
+            const pool = getPool();
+            const id = Number(req.params.id);
+            const affRes = await pool.query("SELECT * FROM affectations WHERE id = $1", [id]);
+            const aff = affRes.rows[0];
+            if (!aff) {
+                res.status(404).json({ detail: "Affectation introuvable." });
+                return;
+            }
+            const vRes = await pool.query("SELECT * FROM voitures WHERE id = $1", [aff.voiture]);
+            const voiture = vRes.rows[0];
+            if (voiture?.validee) {
+                res.status(400).json({
+                    detail: "Impossible de retirer un étudiant d'une voiture déjà validée.",
+                });
+                return;
+            }
+
+            await pool.query("DELETE FROM affectations WHERE id = $1", [id]);
+            if (voiture && voiture.chef_voiture === aff.etudiant) {
+                const rem = await pool.query(
+                    "SELECT etudiant FROM affectations WHERE voiture = $1 ORDER BY id ASC LIMIT 1",
+                    [voiture.id]
+                );
+                await pool.query("UPDATE voitures SET chef_voiture = $1 WHERE id = $2", [
+                    rem.rows[0]?.etudiant ?? null,
+                    voiture.id,
+                ]);
+            }
+            res.status(204).end();
+        } catch (err: any) {
+            res.status(500).json({ detail: err.message });
         }
-        const aff = affectations[idx];
-        const voiture = voitures.find((v) => v.id === aff.voiture);
-        if (voiture?.validee) {
-            res.status(400).json({ detail: "Impossible de retirer un étudiant d'une voiture déjà validée." });
-            return;
-        }
-        affectations.splice(idx, 1);
-        if (voiture && voiture.chef_voiture === aff.etudiant) {
-            const remaining = affectations.find((a) => a.voiture === voiture.id);
-            voiture.chef_voiture = remaining ? remaining.etudiant : null;
-        }
-        res.status(204).end();
     });
 
     // ============ AGENT IA ============
@@ -667,50 +915,47 @@ export async function createApp() {
             }
             const ai = getGeminiClient();
             if (!ai) {
-                res.status(500).json({
-                    detail: "Clé GEMINI_API_KEY manquante côté serveur.",
-                });
+                res.status(500).json({ detail: "Clé GEMINI_API_KEY manquante côté serveur." });
                 return;
             }
 
-            const assignedIds = new Set(affectations.map((a) => a.etudiant));
+            const pool = getPool();
+            const [pRes, eRes, vRes, aRes, progRes] = await Promise.all([
+                pool.query("SELECT * FROM parametres_voyage WHERE id = 1"),
+                pool.query("SELECT id, matricule, nom, prenom, parcours, telephone, email FROM etudiants ORDER BY id ASC"),
+                pool.query("SELECT * FROM voitures ORDER BY numero_voiture ASC"),
+                pool.query("SELECT etudiant, voiture FROM affectations"),
+                pool.query("SELECT jour, periode, heure_debut, heure_fin, activite, lieu FROM programme_items ORDER BY jour ASC, heure_debut ASC"),
+            ]);
+
+            const affByStudent = new Map(aRes.rows.map((a) => [a.etudiant, a.voiture]));
+            const voitureById = new Map(vRes.rows.map((v) => [v.id, v]));
+            const studentById = new Map(eRes.rows.map((e) => [e.id, e]));
+
             const dbSnapshot = {
                 statistiques: {
-                    total_etudiants: etudiants.length,
-                    total_affectes: assignedIds.size,
-                    total_non_affectes: etudiants.length - assignedIds.size,
-                    total_voitures: voitures.length,
-                    voitures_validees: voitures.filter((v) => v.validee).length,
+                    total_etudiants: eRes.rows.length,
+                    total_affectes: aRes.rows.length,
+                    total_non_affectes: eRes.rows.length - aRes.rows.length,
+                    total_voitures: vRes.rows.length,
+                    voitures_validees: vRes.rows.filter((v) => v.validee).length,
                 },
-                parametres,
-                etudiants: etudiants.map((e) => {
-                    const aff = affectations.find((a) => a.etudiant === e.id);
-                    const voiture = aff ? voitures.find((v) => v.id === aff.voiture) : null;
+                parametres: pRes.rows[0] || null,
+                etudiants: eRes.rows.map((e) => {
+                    const vId = affByStudent.get(e.id);
+                    const v = vId ? voitureById.get(vId) : null;
                     return {
-                        id: e.id,
-                        matricule: e.matricule,
-                        nom: e.nom,
-                        prenom: e.prenom,
-                        parcours: e.parcours,
-                        telephone: e.telephone,
-                        email: e.email,
-                        voiture_numero: voiture ? voiture.numero_voiture : null,
-                        est_chef_de_voiture: voiture ? voiture.chef_voiture === e.id : false,
+                        ...e,
+                        voiture_numero: v ? v.numero_voiture : null,
+                        est_chef_de_voiture: v ? v.chef_voiture === e.id : false,
                     };
                 }),
-                voitures: voitures.map((v) => {
-                    const affs = affectations.filter((a) => a.voiture === v.id);
-                    const chef = v.chef_voiture ? etudiants.find((e) => e.id === v.chef_voiture) : null;
-                    const passagers = affs
-                        .map((a) => etudiants.find((e) => e.id === a.etudiant))
-                        .filter((e): e is Etudiant => Boolean(e))
-                        .map((e) => ({
-                            matricule: e.matricule,
-                            nom: e.nom,
-                            prenom: e.prenom,
-                            parcours: e.parcours,
-                            telephone: e.telephone,
-                        }));
+                voitures: vRes.rows.map((v) => {
+                    const passagers = aRes.rows
+                        .filter((a) => a.voiture === v.id)
+                        .map((a) => studentById.get(a.etudiant))
+                        .filter(Boolean);
+                    const chef = v.chef_voiture ? studentById.get(v.chef_voiture) : null;
                     return {
                         numero_voiture: v.numero_voiture,
                         immatriculation: v.immatriculation,
@@ -721,19 +966,12 @@ export async function createApp() {
                         places_disponibles: Math.max(0, v.capacite - passagers.length),
                         validee_par_admin: v.validee,
                         chef_voiture: chef
-                            ? {
-                                matricule: chef.matricule,
-                                nom: chef.nom,
-                                prenom: chef.prenom,
-                                telephone: chef.telephone,
-                            }
+                            ? { matricule: chef.matricule, nom: chef.nom, prenom: chef.prenom, telephone: chef.telephone }
                             : null,
                         passagers,
                     };
                 }),
-                programme: [...programmes].sort(
-                    (a, b) => a.jour - b.jour || a.heure_debut.localeCompare(b.heure_debut)
-                ),
+                programme: progRes.rows,
             };
 
             const formattedHistory = Array.isArray(history)
@@ -749,7 +987,7 @@ export async function createApp() {
                 "Tu es l'Agent IA officiel de VoyageE — ENI (École Nationale d'Informatique).",
                 "Tu aides les administrateurs et les responsables (chefs de voiture) à consulter instantanément toutes les informations du voyage d'étude.",
                 "Réponds toujours en français, de manière claire, précise et structurée.",
-                "RÈGLE STRICTE : Base tes réponses UNIQUEMENT sur les données JSON en direct de la base fournies ci-dessous. N'invente jamais un matricule, un nom, un numéro de voiture ou un horaire. Si un matricule ou une information n'existe pas dans la base, dis-le clairement.",
+                "RÈGLE STRICTE : Base tes réponses UNIQUEMENT sur les données JSON en direct de la base fournies ci-dessous. N'invente jamais un matricule, un nom, un numéro de voiture ou un horaire.",
                 `DONNÉES EN DIRECT DE LA BASE :\n${JSON.stringify(dbSnapshot, null, 2)}`,
             ].join("\n\n");
 
@@ -764,128 +1002,163 @@ export async function createApp() {
             });
 
             res.json({ reply: response.text || "Aucune réponse générée." });
-        } catch (err: unknown) {
-            const msg = err instanceof Error ? err.message : "Erreur lors de l'appel à l'Agent IA.";
-            res.status(500).json({ detail: msg });
+        } catch (err: any) {
+            res.status(500).json({ detail: err.message || "Erreur Agent IA." });
         }
     });
 
     // ============ BADGES ============
-    app.get("/api/badges/:uuid/info/", (req, res) => {
-        const { frontend, mediaBase } = getBaseUrl(req);
-        const etu = etudiants.find((e) => e.qr_token === req.params.uuid);
-        if (!etu) {
-            res.status(404).json({ detail: "Badge introuvable." });
-            return;
-        }
-        const aff = affectations.find((a) => a.etudiant === etu.id);
-        const voiture = aff ? voitures.find((v) => v.id === aff.voiture) || null : null;
-        const sortedProgramme = [...programmes].sort(
-            (a, b) => a.jour - b.jour || a.heure_debut.localeCompare(b.heure_debut)
-        );
+    app.get("/api/badges/:uuid/info/", async (req, res) => {
+        try {
+            const pool = getPool();
+            const { frontend, mediaBase } = getBaseUrl(req);
+            const { rows } = await pool.query(
+                `SELECT e.id, e.matricule, e.nom, e.prenom, e.parcours, e.email, e.telephone, e.photo, e.qr_token,
+                v.id AS voiture_id, v.numero_voiture
+         FROM etudiants e
+         LEFT JOIN affectations a ON a.etudiant = e.id
+         LEFT JOIN voitures v ON v.id = a.voiture
+         WHERE e.qr_token = $1`,
+                [req.params.uuid]
+            );
+            if (!rows[0]) {
+                res.status(404).json({ detail: "Badge introuvable." });
+                return;
+            }
+            const etuRow = rows[0];
+            const [vRes, progRes, paramRes] = await Promise.all([
+                etuRow.voiture_id
+                    ? pool.query("SELECT * FROM voitures WHERE id = $1", [etuRow.voiture_id])
+                    : Promise.resolve({ rows: [] }),
+                pool.query("SELECT * FROM programme_items ORDER BY jour ASC, heure_debut ASC"),
+                pool.query("SELECT * FROM parametres_voyage WHERE id = 1"),
+            ]);
 
-        res.json({
-            etudiant: enrichEtudiant(etu, mediaBase),
-            voiture,
-            programme: sortedProgramme,
-            parametres,
-            qr_url: `${mediaBase}/api/badges/${etu.qr_token}/qr/`,
-            badge_public_url: `${frontend}/badge/${etu.qr_token}`,
-        });
+            res.json({
+                etudiant: formatEtudiant(etuRow, mediaBase),
+                voiture: vRes.rows[0] || null,
+                programme: progRes.rows,
+                parametres: paramRes.rows[0],
+                qr_url: `${mediaBase}/api/badges/${etuRow.qr_token}/qr/`,
+                badge_public_url: `${frontend}/badge/${etuRow.qr_token}`,
+            });
+        } catch (err: any) {
+            res.status(500).json({ detail: err.message });
+        }
     });
 
     app.get("/api/badges/:uuid/qr/", async (req, res) => {
-        const { frontend } = getBaseUrl(req);
-        const etu = etudiants.find((e) => e.qr_token === req.params.uuid);
-        if (!etu) {
-            res.status(404).json({ detail: "Badge introuvable." });
-            return;
+        try {
+            const pool = getPool();
+            const { frontend } = getBaseUrl(req);
+            const { rows } = await pool.query("SELECT qr_token FROM etudiants WHERE qr_token = $1", [
+                req.params.uuid,
+            ]);
+            if (!rows[0]) {
+                res.status(404).json({ detail: "Badge introuvable." });
+                return;
+            }
+            const pngBuffer = await QRCode.toBuffer(`${frontend}/badge/${rows[0].qr_token}`, {
+                type: "png",
+                width: 320,
+                margin: 2,
+                color: { dark: "#14532d", light: "#ffffff" },
+            });
+            res.setHeader("Content-Type", "image/png");
+            res.setHeader("Cache-Control", "no-store");
+            res.send(pngBuffer);
+        } catch (err: any) {
+            res.status(500).json({ detail: err.message });
         }
-        const targetUrl = `${frontend}/badge/${etu.qr_token}`;
-        const pngBuffer = await QRCode.toBuffer(targetUrl, {
-            type: "png",
-            width: 320,
-            margin: 2,
-            color: { dark: "#14532d", light: "#ffffff" },
-        });
-        res.setHeader("Content-Type", "image/png");
-        res.setHeader("Cache-Control", "no-store");
-        res.send(pngBuffer);
     });
 
     app.get("/api/badges/:uuid/pdf/", async (req, res) => {
-        const { frontend } = getBaseUrl(req);
-        const etu = etudiants.find((e) => e.qr_token === req.params.uuid);
-        if (!etu) {
-            res.status(404).json({ detail: "Badge introuvable." });
-            return;
+        try {
+            const pool = getPool();
+            const { frontend } = getBaseUrl(req);
+            const { rows } = await pool.query(
+                `SELECT e.*, v.numero_voiture
+         FROM etudiants e
+         LEFT JOIN affectations a ON a.etudiant = e.id
+         LEFT JOIN voitures v ON v.id = a.voiture
+         WHERE e.qr_token = $1`,
+                [req.params.uuid]
+            );
+            const etu = rows[0];
+            if (!etu) {
+                res.status(404).json({ detail: "Badge introuvable." });
+                return;
+            }
+
+            const [progRes, paramRes] = await Promise.all([
+                pool.query("SELECT * FROM programme_items ORDER BY jour ASC, heure_debut ASC"),
+                pool.query("SELECT * FROM parametres_voyage WHERE id = 1"),
+            ]);
+            const parametres = paramRes.rows[0];
+            const sortedProgramme = progRes.rows;
+            const qrBuffer = await QRCode.toBuffer(`${frontend}/badge/${etu.qr_token}`, {
+                type: "png",
+                width: 240,
+                margin: 1,
+                color: { dark: "#14532d", light: "#ffffff" },
+            });
+
+            const doc = new PDFDocument({ size: "A6", margin: 18 });
+            res.setHeader("Content-Type", "application/pdf");
+            res.setHeader("Content-Disposition", `attachment; filename="badge_${etu.matricule}.pdf"`);
+            doc.pipe(res);
+
+            doc.rect(0, 0, doc.page.width, 62).fill("#14532d");
+            doc.fillColor("#facc15").fontSize(12).font("Helvetica-Bold").text("VOYAGE D'ÉTUDES — ENI", 18, 16);
+            doc.fillColor("#ffffff").fontSize(9).font("Helvetica").text(`Destination : ${parametres.destination} · Promo ${parametres.annee_promotion}`, 18, 34);
+
+            let y = 74;
+            for (let j = 1; j <= 7; j++) {
+                const items = sortedProgramme.filter((p) => p.jour === j);
+                doc.fillColor("#15803d").fontSize(8.5).font("Helvetica-Bold").text(`J-0${j}`, 18, y);
+                const summary = items.length
+                    ? items.map((i) => `${i.periode === "MATIN" ? "M" : "A"}: ${i.activite}`).join(" | ")
+                    : "Programme libre";
+                doc.fillColor("#1e293b").fontSize(7.5).font("Helvetica").text(summary, 44, y, { width: doc.page.width - 62, lineGap: 1 });
+                y = Math.max(y + 22, doc.y + 6);
+            }
+
+            doc.roundedRect(18, doc.page.height - 54, doc.page.width - 36, 36, 6).fill("#facc15");
+            doc.fillColor("#14532d").fontSize(14).font("Helvetica-Bold").text(
+                etu.numero_voiture ? `VOITURE N° ${etu.numero_voiture}` : "VOITURE NON AFFECTÉE",
+                18,
+                doc.page.height - 42,
+                { width: doc.page.width - 36, align: "center" }
+            );
+
+            doc.addPage({ size: "A6", margin: 18 });
+            doc.rect(0, 0, doc.page.width, 54).fill("#166534");
+            doc.fillColor("#ffffff").fontSize(11).font("Helvetica-Bold").text("BADGE ÉTUDIANT", 18, 15);
+            doc.fillColor("#fde047").fontSize(8.5).font("Helvetica").text(`${parametres.ecole} · ${parametres.destination}`, 18, 31);
+
+            doc.fillColor("#0f172a").fontSize(13).font("Helvetica-Bold").text(`${etu.nom} ${etu.prenom}`, 18, 72, { width: doc.page.width - 36, align: "center" });
+            doc.fillColor("#475569").fontSize(9.5).font("Helvetica").text(`Matricule : ${etu.matricule} · Parcours : ${etu.parcours}`, 18, 92, { width: doc.page.width - 36, align: "center" });
+
+            doc.roundedRect(50, 114, doc.page.width - 100, 26, 5).fill("#dcfce7");
+            doc.fillColor("#14532d").fontSize(11).font("Helvetica-Bold").text(
+                etu.numero_voiture ? `VOITURE V${etu.numero_voiture}` : "NON AFFECTÉ",
+                50,
+                121,
+                { width: doc.page.width - 100, align: "center" }
+            );
+
+            doc.image(qrBuffer, (doc.page.width - 110) / 2, 154, { width: 110, height: 110 });
+
+            doc.fillColor("#334155").fontSize(8).font("Helvetica-Bold").text("Contacts d'urgence :", 18, 282);
+            doc.fillColor("#475569").fontSize(7.5).font("Helvetica").text(`Resp. Voyage : ${parametres.nom_responsable} (${parametres.tel_responsable})`, 18, 296);
+            doc.text(`Resp. Santé : ${parametres.nom_responsable_sante} (${parametres.tel_responsable_sante})`, 18, 310);
+
+            doc.end();
+        } catch (err: any) {
+            res.status(500).json({ detail: err.message });
         }
-        const aff = affectations.find((a) => a.etudiant === etu.id);
-        const voiture = aff ? voitures.find((v) => v.id === aff.voiture) || null : null;
-        const sortedProgramme = [...programmes].sort(
-            (a, b) => a.jour - b.jour || a.heure_debut.localeCompare(b.heure_debut)
-        );
-        const qrBuffer = await QRCode.toBuffer(`${frontend}/badge/${etu.qr_token}`, {
-            type: "png",
-            width: 240,
-            margin: 1,
-            color: { dark: "#14532d", light: "#ffffff" },
-        });
-
-        const doc = new PDFDocument({ size: "A6", margin: 18 });
-        res.setHeader("Content-Type", "application/pdf");
-        res.setHeader("Content-Disposition", `attachment; filename="badge_${etu.matricule}.pdf"`);
-        doc.pipe(res);
-
-        doc.rect(0, 0, doc.page.width, 62).fill("#14532d");
-        doc.fillColor("#facc15").fontSize(12).font("Helvetica-Bold").text("VOYAGE D'ÉTUDES — ENI", 18, 16);
-        doc.fillColor("#ffffff").fontSize(9).font("Helvetica").text(`Destination : ${parametres.destination} · Promo ${parametres.annee_promotion}`, 18, 34);
-
-        let y = 74;
-        for (let j = 1; j <= 7; j++) {
-            const items = sortedProgramme.filter((p) => p.jour === j);
-            doc.fillColor("#15803d").fontSize(8.5).font("Helvetica-Bold").text(`J-0${j}`, 18, y);
-            const summary = items.length
-                ? items.map((i) => `${i.periode === "MATIN" ? "M" : "A"}: ${i.activite}`).join(" | ")
-                : "Programme libre";
-            doc.fillColor("#1e293b").fontSize(7.5).font("Helvetica").text(summary, 44, y, { width: doc.page.width - 62, lineGap: 1 });
-            y = Math.max(y + 22, doc.y + 6);
-        }
-
-        doc.roundedRect(18, doc.page.height - 54, doc.page.width - 36, 36, 6).fill("#facc15");
-        doc.fillColor("#14532d").fontSize(14).font("Helvetica-Bold").text(
-            voiture ? `VOITURE N° ${voiture.numero_voiture}` : "VOITURE NON AFFECTÉE",
-            18,
-            doc.page.height - 42,
-            { width: doc.page.width - 36, align: "center" }
-        );
-
-        doc.addPage({ size: "A6", margin: 18 });
-        doc.rect(0, 0, doc.page.width, 54).fill("#166534");
-        doc.fillColor("#ffffff").fontSize(11).font("Helvetica-Bold").text("BADGE ÉTUDIANT", 18, 15);
-        doc.fillColor("#fde047").fontSize(8.5).font("Helvetica").text(`${parametres.ecole} · ${parametres.destination}`, 18, 31);
-
-        doc.fillColor("#0f172a").fontSize(13).font("Helvetica-Bold").text(`${etu.nom} ${etu.prenom}`, 18, 72, { width: doc.page.width - 36, align: "center" });
-        doc.fillColor("#475569").fontSize(9.5).font("Helvetica").text(`Matricule : ${etu.matricule} · Parcours : ${etu.parcours}`, 18, 92, { width: doc.page.width - 36, align: "center" });
-
-        doc.roundedRect(50, 114, doc.page.width - 100, 26, 5).fill("#dcfce7");
-        doc.fillColor("#14532d").fontSize(11).font("Helvetica-Bold").text(
-            voiture ? `VOITURE V${voiture.numero_voiture}` : "NON AFFECTÉ",
-            50,
-            121,
-            { width: doc.page.width - 100, align: "center" }
-        );
-
-        doc.image(qrBuffer, (doc.page.width - 110) / 2, 154, { width: 110, height: 110 });
-
-        doc.fillColor("#334155").fontSize(8).font("Helvetica-Bold").text("Contacts d'urgence :", 18, 282);
-        doc.fillColor("#475569").fontSize(7.5).font("Helvetica").text(`Resp. Voyage : ${parametres.nom_responsable} (${parametres.tel_responsable})`, 18, 296);
-        doc.text(`Resp. Santé : ${parametres.nom_responsable_sante} (${parametres.tel_responsable_sante})`, 18, 310);
-
-        doc.end();
     });
 
-    // ============ VITE / STATIC (local uniquement) ============
     if (process.env.NODE_ENV !== "production" && !process.env.VERCEL) {
         const { createServer: createViteServer } = await import("vite");
         const vite = await createViteServer({
