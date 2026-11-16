@@ -8,8 +8,8 @@ import Button from "../../components/ui/Button";
 export const LoginPage: React.FC = () => {
   const { login } = useAuth();
   const navigate = useNavigate();
-  const [username, setUsername] = useState("admin");
-  const [password, setPassword] = useState("eni2026");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -82,8 +82,8 @@ export const LoginPage: React.FC = () => {
           </form>
 
           <p className="text-xs text-slate-500 text-center">
-            Identifiants par défaut configurés : <span className="font-mono text-slate-700">admin</span> /{" "}
-            <span className="font-mono text-slate-700">eni2026</span>
+            Identifiants par défaut configurés : <span className="font-mono text-slate-700"></span> /{" "}
+            <span className="font-mono text-slate-700"></span>
           </p>
         </div>
       </div>
