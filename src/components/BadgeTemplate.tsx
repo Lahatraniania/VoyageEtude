@@ -1,5 +1,6 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { RefreshCw, MapPin, Heart, Users, QrCode } from "lucide-react";
+import { getProgrammeDayInfo } from "../utils/programmeDate";
 import type { BadgeInfoResponse, ProgrammeItem } from "../types";
 
 interface BadgeTemplateProps {
@@ -15,12 +16,26 @@ const PARCOURS_STYLES: Record<string, string> = {
 
 export const BadgeTemplate: React.FC<BadgeTemplateProps> = ({ data }) => {
   const [flipped, setFlipped] = useState(false);
+  const [photoFailed, setPhotoFailed] = useState(false);
+  const [qrFailed, setQrFailed] = useState(false);
   const { etudiant, voiture, programme, parametres, qr_url } = data;
+
+  useEffect(() => {
+    setPhotoFailed(false);
+    setQrFailed(false);
+  }, [etudiant.photo_url, qr_url]);
 
   const groupedByDay: Record<number, ProgrammeItem[]> = {};
   for (let d = 1; d <= 7; d++) {
     groupedByDay[d] = programme.filter((p) => p.jour === d);
   }
+
+  const startInfo = getProgrammeDayInfo(parametres.date_debut, 1);
+  const endInfo = getProgrammeDayInfo(parametres.date_fin, 1);
+  const headerRange =
+    startInfo && endInfo
+      ? `${startInfo.dateFullNumeric} → ${endInfo.dateFullNumeric}`
+      : `${parametres.date_debut} → ${parametres.date_fin}`;
 
   const initials = `${etudiant.prenom?.[0] || ""}${etudiant.nom?.[0] || ""}`.toUpperCase();
 
@@ -28,13 +43,12 @@ export const BadgeTemplate: React.FC<BadgeTemplateProps> = ({ data }) => {
     <div className="flex flex-col items-center gap-5 w-full max-w-[420px] mx-auto">
       <div className="w-full perspective-1000">
         <div
-          className={`relative w-full min-h-[600px] transition-transform duration-700 transform-style-3d ${
-            flipped ? "rotate-y-180" : ""
-          }`}
+          className={`relative w-full min-h-[640px] transition-transform duration-700 transform-style-3d ${flipped ? "rotate-y-180" : ""
+            }`}
         >
           {/* RECTO : PROGRAMME COMPLET 7 JOURS + NUMÉRO DE VOITURE */}
           <div className="absolute inset-0 backface-hidden rounded-2xl overflow-hidden shadow-2xl border border-eni-600/40 bg-gradient-to-br from-eni-800 via-eni-900 to-eni-950 text-white flex flex-col">
-            <div className="px-5 py-4 bg-white/10 backdrop-blur-md border-b border-white/15 flex items-center justify-between gap-3">
+            <div className="px-5 py-4 bg-white/10 border-b border-white/15 flex items-center justify-between gap-3">
               <div>
                 <p className="text-[11px] font-semibold tracking-wider text-gold-400">
                   {parametres.ecole} · PROMO {parametres.annee_promotion || "2026"}
@@ -48,23 +62,29 @@ export const BadgeTemplate: React.FC<BadgeTemplateProps> = ({ data }) => {
                   <MapPin className="w-3.5 h-3.5" />
                   <span>{parametres.destination}</span>
                 </div>
-                <p className="text-[11px] text-eni-200 tabular-nums">
-                  {parametres.date_debut} → {parametres.date_fin}
-                </p>
+                <p className="text-[11px] text-eni-200 tabular-nums">{headerRange}</p>
               </div>
             </div>
 
             <div className="flex-1 p-4 space-y-2 overflow-y-auto">
               {[1, 2, 3, 4, 5, 6, 7].map((jour) => {
                 const items = groupedByDay[jour] || [];
+                const dayInfo = getProgrammeDayInfo(parametres.date_debut, jour);
                 return (
                   <div
                     key={jour}
-                    className="rounded-lg bg-white/8 backdrop-blur-sm border border-white/10 px-3 py-2 flex items-start gap-2.5"
+                    className="rounded-lg bg-white/10 border border-white/10 px-3 py-2 flex items-start gap-2.5"
                   >
-                    <span className="font-mono text-xs font-bold text-gold-400 shrink-0 pt-0.5 tabular-nums">
-                      J-0{jour}
-                    </span>
+                    <div className="w-[58px] shrink-0 pt-0.5">
+                      <span className="block font-mono text-xs font-bold text-gold-400 tabular-nums leading-tight">
+                        J-0{jour}
+                      </span>
+                      {dayInfo && (
+                        <span className="block text-[10px] font-medium text-eni-200 tabular-nums leading-tight mt-0.5">
+                          {dayInfo.compactLabel}
+                        </span>
+                      )}
+                    </div>
                     <div className="min-w-0 flex-1 space-y-0.5">
                       {items.length > 0 ? (
                         items.map((item) => (
@@ -98,22 +118,22 @@ export const BadgeTemplate: React.FC<BadgeTemplateProps> = ({ data }) => {
 
           {/* VERSO : PHOTO, IDENTITÉ, PARCOURS, VOITURE, CONTACTS, QR CODE */}
           <div className="absolute inset-0 backface-hidden rotate-y-180 rounded-2xl overflow-hidden shadow-2xl border border-eni-600/40 bg-gradient-to-br from-eni-700 via-eni-800 to-eni-950 text-white flex flex-col">
-            <div className="px-5 py-3.5 bg-white/10 backdrop-blur-md border-b border-white/15 flex items-center justify-between">
+            <div className="px-5 py-3.5 bg-white/10 border-b border-white/15 flex items-center justify-between">
               <span className="font-display text-sm font-bold tracking-wide text-gold-400">
                 BADGE OFFICIEL {parametres.ecole}
               </span>
               <span className="text-xs text-eni-100">{parametres.destination}</span>
             </div>
 
-            <div className="flex-1 p-5 flex flex-col items-center justify-between text-center">
+            <div className="flex-1 p-5 flex flex-col items-center justify-between text-center gap-3">
               <div className="flex flex-col items-center">
                 <div className="w-24 h-24 rounded-full border-3 border-gold-400 overflow-hidden bg-eni-900 shadow-lg flex items-center justify-center">
-                  {etudiant.photo_url ? (
+                  {etudiant.photo_url && !photoFailed ? (
                     <img
                       src={etudiant.photo_url}
                       alt={`${etudiant.prenom} ${etudiant.nom}`}
                       className="w-full h-full object-cover"
-                      referrerPolicy="no-referrer"
+                      onError={() => setPhotoFailed(true)}
                     />
                   ) : (
                     <span className="font-display text-2xl font-bold text-gold-300">
@@ -131,9 +151,8 @@ export const BadgeTemplate: React.FC<BadgeTemplateProps> = ({ data }) => {
                     {etudiant.matricule}
                   </span>
                   <span
-                    className={`text-xs font-semibold px-2.5 py-1 rounded-md border ${
-                      PARCOURS_STYLES[etudiant.parcours] || "bg-white/15 text-white border-white/20"
-                    }`}
+                    className={`text-xs font-semibold px-2.5 py-1 rounded-md border ${PARCOURS_STYLES[etudiant.parcours] || "bg-white/15 text-white border-white/20"
+                      }`}
                   >
                     {etudiant.parcours}
                   </span>
@@ -147,12 +166,12 @@ export const BadgeTemplate: React.FC<BadgeTemplateProps> = ({ data }) => {
               </div>
 
               <div className="p-2.5 bg-white rounded-xl shadow-md">
-                {qr_url ? (
+                {qr_url && !qrFailed ? (
                   <img
                     src={qr_url}
                     alt={`QR Code ${etudiant.matricule}`}
-                    className="w-32 h-32 object-contain"
-                    referrerPolicy="no-referrer"
+                    className="w-32 h-32 object-contain block"
+                    onError={() => setQrFailed(true)}
                   />
                 ) : (
                   <div className="w-32 h-32 flex items-center justify-center text-eni-900">
@@ -161,7 +180,7 @@ export const BadgeTemplate: React.FC<BadgeTemplateProps> = ({ data }) => {
                 )}
               </div>
 
-              <div className="w-full rounded-xl bg-white/10 backdrop-blur-md border border-white/15 p-3 text-left space-y-1.5 text-xs">
+              <div className="w-full rounded-xl bg-white/10 border border-white/15 p-3 text-left space-y-1.5 text-xs">
                 <div className="flex items-center gap-2 text-eni-100">
                   <Users className="w-3.5 h-3.5 text-gold-400 shrink-0" />
                   <span className="truncate">

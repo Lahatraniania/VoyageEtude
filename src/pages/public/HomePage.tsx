@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { QrCode, ArrowRight, MapPin, Users, CheckCircle, Target } from "lucide-react";
 import axiosClient from "../../api/axiosClient";
+import { getProgrammeDayInfo } from "../../utils/programmeDate";
 import type { ParametresVoyage } from "../../types";
 
 export const HomePage: React.FC = () => {
@@ -13,7 +14,7 @@ export const HomePage: React.FC = () => {
       .then((res) => {
         if (res.data.length > 0) setParams(res.data[0]);
       })
-      .catch(() => {});
+      .catch(() => { });
   }, []);
 
   return (
@@ -109,7 +110,9 @@ export const HomePage: React.FC = () => {
                   <div>
                     <dt className="text-xs text-eni-200">Période</dt>
                     <dd className="font-medium text-white mt-0.5 tabular-nums">
-                      {params ? `${params.date_debut} → ${params.date_fin}` : "7 jours"}
+                      {params
+                        ? `${getProgrammeDayInfo(params.date_debut, 1)?.dateFullNumeric || params.date_debut} → ${getProgrammeDayInfo(params.date_fin, 1)?.dateFullNumeric || params.date_fin}`
+                        : "7 jours"}
                     </dd>
                   </div>
                   <div>

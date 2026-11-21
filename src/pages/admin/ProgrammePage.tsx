@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useCallback } from "react";
-import { Plus, Pencil, Trash2, MapPin } from "lucide-react";
+import { Link } from "react-router-dom";
+import { Plus, Pencil, Trash2, MapPin, CalendarDays } from "lucide-react";
 import Layout from "../../components/Layout";
 import Card from "../../components/ui/Card";
 import Button from "../../components/ui/Button";
@@ -9,10 +10,12 @@ import ConfirmDialog from "../../components/ui/ConfirmDialog";
 import Spinner from "../../components/ui/Spinner";
 import EmptyState from "../../components/ui/EmptyState";
 import axiosClient from "../../api/axiosClient";
-import type { ProgrammeItem } from "../../types";
+import { formatIsoDateFr, getProgrammeDayInfo } from "../../utils/programmeDate";
+import type { ParametresVoyage, ProgrammeItem } from "../../types";
 
 export const ProgrammePage: React.FC = () => {
   const [items, setItems] = useState<ProgrammeItem[]>([]);
+  const [parametres, setParametres] = useState<ParametresVoyage | null>(null);
   const [loading, setLoading] = useState(true);
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<ProgrammeItem | null>(null);
@@ -31,8 +34,14 @@ export const ProgrammePage: React.FC = () => {
   const fetchProgramme = useCallback(async () => {
     setLoading(true);
     try {
-      const { data } = await axiosClient.get<ProgrammeItem[]>("/programme/");
-      setItems(data);
+      const [progRes, paramRes] = await Promise.all([
+        axiosClient.get<ProgrammeItem[]>("/programme/"),
+        axiosClient.get<ParametresVoyage[]>("/core/parametres/"),
+      ]);
+      setItems(progRes.data);
+      if (paramRes.data.length > 0) {
+        setParametres(paramRes.data[0]);
+      }
     } finally {
       setLoading(false);
     }
@@ -100,13 +109,35 @@ export const ProgrammePage: React.FC = () => {
     }
   };
 
+  const dateDebut = parametres?.date_debut;
+
   return (
     <Layout title="Programme des 7 jours">
       <div className="space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <p className="text-sm text-slate-600">
-            Activités affichées directement au recto des badges étudiants (J-01 à J-07).
-          </p>
+          <div className="space-y-1">
+            <p className="text-sm text-slate-600">
+              Activités affichées directement au recto des badges étudiants (J-01 à J-07).
+            </p>
+            <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+              <CalendarDays className="w-3.5 h-3.5 text-eni-700 shrink-0" />
+              {dateDebut ? (
+                <span>
+                  Dates calculées automatiquement à partir du{" "}
+                  <strong className="text-slate-700">{formatIsoDateFr(dateDebut)}</strong>
+                </span>
+              ) : (
+                <span>Aucune date de début définie dans les paramètres.</span>
+              )}
+              <span aria-hidden="true">·</span>
+              <Link
+                to="/admin/parametres"
+                className="font-medium text-eni-700 hover:text-eni-900 hover:underline"
+              >
+                Modifier les dates
+              </Link>
+            </div>
+          </div>
           <Button onClick={() => openCreate(1)}>
             <Plus className="w-4 h-4" />
             <span>Ajouter une activité</span>
@@ -126,15 +157,26 @@ export const ProgrammePage: React.FC = () => {
           <div className="grid gap-4">
             {[1, 2, 3, 4, 5, 6, 7].map((jour) => {
               const dayItems = items.filter((p) => p.jour === jour);
+              const dayInfo = getProgrammeDayInfo(dateDebut, jour);
               return (
                 <Card key={jour} padding="none" className="overflow-hidden">
-                  <div className="px-5 py-3 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
-                    <div className="flex items-center gap-3">
+                  <div className="px-5 py-3 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-2.5">
                       <span className="font-mono text-sm font-bold text-eni-800 tabular-nums">
                         J-0{jour}
                       </span>
+                      {dayInfo && (
+                        <>
+                          <span aria-hidden="true" className="text-slate-300">
+                            ·
+                          </span>
+                          <span className="text-sm font-semibold text-slate-800">
+                            {dayInfo.fullLabel}
+                          </span>
+                        </>
+                      )}
                       <span className="text-xs text-slate-500">
-                        {dayItems.length} activité(s)
+                        ({dayItems.length} activité{dayItems.length > 1 ? "s" : ""})
                       </span>
                     </div>
                     <button
@@ -143,6 +185,7 @@ export const ProgrammePage: React.FC = () => {
                       className="text-xs font-medium text-eni-700 hover:text-eni-900 cursor-pointer"
                     >
                       + Ajouter sur J-0{jour}
+                      {dayInfo ? ` (${dayInfo.compactLabel})` : ""}
                     </button>
                   </div>
                   <div className="divide-y divide-slate-100">
@@ -218,11 +261,14 @@ export const ProgrammePage: React.FC = () => {
                 onChange={(e) => setForm({ ...form, jour: Number(e.target.value) })}
                 className="w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-sm min-h-[40px]"
               >
-                {[1, 2, 3, 4, 5, 6, 7].map((j) => (
-                  <option key={j} value={j}>
-                    Jour J-0{j}
-                  </option>
-                ))}
+                {[1, 2, 3, 4, 5, 6, 7].map((j) => {
+                  const dayInfo = getProgrammeDayInfo(dateDebut, j);
+                  return (
+                    <option key={j} value={j}>
+                      {dayInfo ? `J-0${j} — ${dayInfo.fullLabel}` : `Jour J-0${j}`}
+                    </option>
+                  );
+                })}
               </select>
             </div>
 

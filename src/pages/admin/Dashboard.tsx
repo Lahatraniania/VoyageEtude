@@ -5,6 +5,7 @@ import Layout from "../../components/Layout";
 import Card from "../../components/ui/Card";
 import Spinner from "../../components/ui/Spinner";
 import axiosClient from "../../api/axiosClient";
+import { formatIsoDateFr } from "../../utils/programmeDate";
 import type { Etudiant, ProgrammeItem, Voiture, ParametresVoyage } from "../../types";
 
 export const Dashboard: React.FC = () => {
@@ -58,7 +59,9 @@ export const Dashboard: React.FC = () => {
               Voyage d&apos;étude — {parametres?.destination || "TOLIARA"}
             </h2>
             <p className="text-sm text-eni-100 mt-1 tabular-nums">
-              {parametres ? `Du ${parametres.date_debut} au ${parametres.date_fin}` : "7 jours"}
+              {parametres
+                ? `Du ${formatIsoDateFr(parametres.date_debut)} au ${formatIsoDateFr(parametres.date_fin)}`
+                : "7 jours"}
             </p>
           </div>
           <Link
